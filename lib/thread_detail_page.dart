@@ -42,6 +42,7 @@ class ThreadDetailPage extends StatefulWidget {
 class _ThreadDetailPageState extends State<ThreadDetailPage>
     with SingleTickerProviderStateMixin {
   late final WebViewController _hiddenController;
+  late final WebViewController _favCheckController;
   final ScrollController _scrollController = ScrollController();
 
   List<PostItem> _posts = [];
@@ -56,7 +57,9 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
 
   bool _isFavorited = false;
   String? _favid;
-  String? _formhash;
+
+  // 保存 Cookie
+  String _cookieString = "";
 
   late AnimationController _fabAnimationController;
   late Animation<double> _fabAnimation;
@@ -65,6 +68,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   int _currentPage = 1;
   String? _landlordUid;
 
+  // 强制使用带 www 的域名
   final String _baseUrl = "https://www.giantessnight.com/gnforum2012/";
 
   @override
@@ -78,12 +82,57 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       parent: _fabAnimationController,
       curve: Curves.easeInOut,
     );
+
     _initWebView();
     _initFavCheck();
     _scrollController.addListener(_onScroll);
   }
 
-  late final WebViewController _favCheckController;
+  @override
+  void dispose() {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    _scrollController.dispose();
+    _fabAnimationController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 500) {
+      _loadMore();
+    }
+  }
+
+  void _toggleFab() {
+    setState(() {
+      _isFabOpen = !_isFabOpen;
+      if (_isFabOpen)
+        _fabAnimationController.forward();
+      else
+        _fabAnimationController.reverse();
+    });
+  }
+
+  void _toggleReaderMode() {
+    setState(() {
+      _isReaderMode = !_isReaderMode;
+      if (_isReaderMode)
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      else
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    });
+    _toggleFab();
+  }
+
+  void _initWebView() {
+    _hiddenController = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setUserAgent(kUserAgent)
+      ..setNavigationDelegate(
+        NavigationDelegate(onPageFinished: (url) => _parseHtmlData()),
+      );
+    _loadPage(1);
+  }
 
   void _initFavCheck() {
     _favCheckController = WebViewController()
@@ -134,16 +183,21 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           }
         }
       }
-      if (mounted && foundFavid != null) {
-        setState(() {
-          _isFavorited = true;
-          _favid = foundFavid;
-        });
+      if (mounted) {
+        if (foundFavid != null)
+          setState(() {
+            _isFavorited = true;
+            _favid = foundFavid;
+          });
+        else if (_isFavorited)
+          setState(() {
+            _isFavorited = false;
+            _favid = null;
+          });
       }
     } catch (e) {}
   }
 
-  // 工具：清理 HTML 转义
   String _cleanHtml(String raw) {
     String clean = raw;
     if (clean.startsWith('"')) clean = clean.substring(1, clean.length - 1);
@@ -154,67 +208,30 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     return clean;
   }
 
-  @override
-  void dispose() {
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    _scrollController.dispose();
-    _fabAnimationController.dispose();
-    super.dispose();
-  }
+  // 【核心工具】强制修复 URL：补全 www，补全域名
+  String _fixUrl(String url) {
+    if (url.isEmpty) return "";
 
-  void _onScroll() {
-    if (_scrollController.position.pixels >=
-        _scrollController.position.maxScrollExtent - 500) {
-      _loadMore();
+    String fixedUrl = url;
+
+    // 1. 补全相对路径
+    if (!fixedUrl.startsWith('http')) {
+      if (fixedUrl.startsWith('/')) {
+        fixedUrl = "https://www.giantessnight.com$fixedUrl";
+      } else {
+        fixedUrl = _baseUrl + fixedUrl;
+      }
     }
-  }
 
-  void _toggleFab() {
-    setState(() {
-      _isFabOpen = !_isFabOpen;
-      if (_isFabOpen)
-        _fabAnimationController.forward();
-      else
-        _fabAnimationController.reverse();
-    });
-  }
-
-  void _toggleReaderMode() {
-    setState(() {
-      _isReaderMode = !_isReaderMode;
-      if (_isReaderMode)
-        SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      else
-        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    });
-    _toggleFab();
-  }
-
-  void _initWebView() {
-    _hiddenController = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(kUserAgent)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageFinished: (url) {
-            _parseHtmlData();
-            _tryExtractFormHash();
-          },
-        ),
+    // 2. 强制加上 www (解决 Cloudflare 5秒盾和登录失效的关键！)
+    if (fixedUrl.contains("https://giantessnight.com")) {
+      fixedUrl = fixedUrl.replaceFirst(
+        "https://giantessnight.com",
+        "https://www.giantessnight.com",
       );
-    _loadPage(1);
-  }
+    }
 
-  Future<void> _tryExtractFormHash() async {
-    try {
-      final String formhash =
-          await _hiddenController.runJavaScriptReturningResult(
-                "document.querySelector('input[name=formhash]').value",
-              )
-              as String;
-      String cleanHash = formhash.replaceAll('"', '');
-      if (cleanHash.isNotEmpty) _formhash = cleanHash;
-    } catch (e) {}
+    return fixedUrl;
   }
 
   void _loadPage(int page) {
@@ -263,6 +280,14 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text("已取消收藏")));
+        Future.delayed(
+          const Duration(seconds: 3),
+          () => _favCheckController.loadRequest(
+            Uri.parse(
+              '${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no',
+            ),
+          ),
+        );
       }
     } else {
       _hiddenController.runJavaScript(
@@ -274,14 +299,23 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text("已发送收藏请求")));
-      Future.delayed(const Duration(seconds: 3), () {
-        _favCheckController.reload();
-      });
+      Future.delayed(
+        const Duration(seconds: 3),
+        () => _favCheckController.reload(),
+      );
     }
   }
 
   Future<void> _parseHtmlData() async {
     try {
+      // 抓取 Cookie (用于图片加载)
+      final Object cookieObj = await _hiddenController
+          .runJavaScriptReturningResult('document.cookie');
+      String rawCookie = cookieObj.toString();
+      if (rawCookie.startsWith('"'))
+        rawCookie = rawCookie.substring(1, rawCookie.length - 1);
+      _cookieString = rawCookie;
+
       final String rawHtml =
           await _hiddenController.runJavaScriptReturningResult(
                 "document.documentElement.outerHTML",
@@ -315,10 +349,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           }
 
           var avatarNode = div.querySelector('.avatar img');
-          String avatarUrl = avatarNode?.attributes['src'] ?? "";
-          if (avatarUrl.isNotEmpty && !avatarUrl.startsWith("http")) {
-            avatarUrl = "$_baseUrl$avatarUrl";
-          }
+          String avatarUrl = _fixUrl(avatarNode?.attributes['src'] ?? "");
 
           var timeNode = div.querySelector('em[id^="authorposton"]');
           String time = timeNode?.text.replaceAll("发表于 ", "").trim() ?? "";
@@ -332,10 +363,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           var contentNode = div.querySelector('td.t_f');
           String content = contentNode?.innerHtml ?? "";
 
-          // === 【修正】图片解析逻辑 ===
-          // 1. 换行
           content = content.replaceAll(r'\n', '<br>');
-          // 2. 移除干扰
           content = content.replaceAll('lazyloaded="true"', '');
           content = content.replaceAll('ignore_js_op', 'div');
           content = content.replaceAll(
@@ -351,47 +379,16 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
             '',
           );
 
-          // 3. 补全所有相对路径 (不删除 src, 保留所有属性给 HtmlWidget 挑选)
+          // 预处理：把所有相对路径都先变成绝对路径
+          // 防止 customWidgetBuilder 解析到 relative path 导致图片不显示
           content = content.replaceAll(
-            'src="data/attachment',
-            'src="${_baseUrl}data/attachment',
+            '="data/attachment',
+            '="${_baseUrl}data/attachment',
           );
           content = content.replaceAll(
-            'file="data/attachment',
-            'file="${_baseUrl}data/attachment',
+            '="forum.php?mod=image',
+            '="${_baseUrl}forum.php?mod=image',
           );
-          content = content.replaceAll(
-            'zoomfile="data/attachment',
-            'zoomfile="${_baseUrl}data/attachment',
-          );
-
-          // 4. 处理占位图 (loading.gif/none.gif)
-          // 如果 src 是占位图，HtmlWidget 可能会显示一个转圈。
-          // 我们这里做一个替换：如果 src 是占位图，直接把它换成 file 或 zoomfile
-          // 但如果 src 本身就是缩略图 (.thumb.jpg)，则不动它
-          content = content.replaceAllMapped(RegExp(r'<img[^>]+>'), (match) {
-            String imgTag = match.group(0)!;
-            // 只有当 src 是占位符时才强行替换
-            if (imgTag.contains('loading.gif') || imgTag.contains('none.gif')) {
-              // 优先找 file (普通图/缩略图)，因为它加载成功率高
-              RegExp fileReg = RegExp(r'file="([^"]+)"');
-              var fileMatch = fileReg.firstMatch(imgTag);
-              if (fileMatch != null) {
-                String url = fileMatch.group(1)!;
-                if (!url.startsWith('http')) url = _baseUrl + url;
-                return '<img src="$url">';
-              }
-              // 没 file 找 zoomfile
-              RegExp zoomReg = RegExp(r'zoomfile="([^"]+)"');
-              var zoomMatch = zoomReg.firstMatch(imgTag);
-              if (zoomMatch != null) {
-                String url = zoomMatch.group(1)!;
-                if (!url.startsWith('http')) url = _baseUrl + url;
-                return '<img src="$url">';
-              }
-            }
-            return imgTag; // 其他情况保留原样 (保留 attributes 供 customWidgetBuilder 使用)
-          });
 
           newPosts.add(
             PostItem(
@@ -492,6 +489,11 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
             height: 0,
             width: 0,
             child: WebViewWidget(controller: _hiddenController),
+          ),
+          SizedBox(
+            height: 0,
+            width: 0,
+            child: WebViewWidget(controller: _favCheckController),
           ),
         ],
       ),
@@ -711,44 +713,31 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
               ],
             ),
             const SizedBox(height: 12),
-
-            // 【核心】自定义图片加载逻辑
             SelectionArea(
               child: HtmlWidget(
                 post.contentHtml,
                 textStyle: const TextStyle(fontSize: 16, height: 1.6),
 
                 customWidgetBuilder: (element) {
-                  // 拦截 img 标签，自己构建 Image Widget
                   if (element.localName == 'img') {
                     String src = element.attributes['src'] ?? '';
                     String zoomfile = element.attributes['zoomfile'] ?? '';
                     String file = element.attributes['file'] ?? '';
 
-                    // 优先级：zoomfile (高清) > file (普通) > src (如果src不是loading)
-                    String urlToLoad = "";
+                    // 优先用高清图 zoomfile
+                    String urlToLoad = zoomfile.isNotEmpty
+                        ? zoomfile
+                        : (file.isNotEmpty ? file : src);
 
-                    if (zoomfile.isNotEmpty) {
-                      urlToLoad = zoomfile;
-                    } else if (file.isNotEmpty) {
-                      urlToLoad = file;
-                    } else if (src.isNotEmpty &&
-                        !src.contains("loading.gif") &&
-                        !src.contains("none.gif")) {
-                      urlToLoad = src;
-                    }
+                    // 【重要】用 _fixUrl 强制修复成 www. 开头
+                    urlToLoad = _fixUrl(urlToLoad);
 
                     if (urlToLoad.isNotEmpty) {
-                      // 补全域名
-                      if (!urlToLoad.startsWith('http'))
-                        urlToLoad = _baseUrl + urlToLoad;
-
                       return _buildClickableImage(urlToLoad);
                     }
                   }
                   return null;
                 },
-
                 customStylesBuilder: (element) {
                   if (element.localName == 'blockquote')
                     return {
@@ -756,6 +745,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                       'border-left': '3px solid #DDD',
                       'padding': '8px',
                     };
+                  if (element.localName == 'img') return {'display': 'none'};
                   return null;
                 },
                 onTapUrl: (url) async {
@@ -770,42 +760,33 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     );
   }
 
-  // 构建一个支持点击查看大图，且有加载失败重试机制的图片组件
   Widget _buildClickableImage(String url) {
     return GestureDetector(
-      onTap: () => print("点击图片: $url"), // 这里以后可以接大图预览
+      onTap: () => print("点击图片: $url"),
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 8),
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(borderRadius: BorderRadius.circular(8)),
         child: Image.network(
           url,
-          headers: const {'User-Agent': kUserAgent}, // 必须带UA，否则403
-          fit: BoxFit.contain,
+          // 【核心】必须带 Cookie 和 UA，否则服务器返回 403
+          headers: {
+            'User-Agent': kUserAgent,
+            'Cookie': _cookieString,
+            'Referer': '${_baseUrl}forum.php',
+          },
           loadingBuilder: (context, child, progress) {
             if (progress == null) return child;
             return Container(
-              height: 150,
+              height: 200,
               color: Colors.grey.shade100,
               child: const Center(child: CircularProgressIndicator()),
             );
           },
           errorBuilder: (context, error, stackTrace) {
-            // 如果高清图加载失败，这里可以放一个占位图或者提示
             return Container(
               height: 100,
               color: Colors.grey.shade200,
-              alignment: Alignment.center,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: const [
-                  Icon(Icons.broken_image, color: Colors.grey),
-                  SizedBox(height: 4),
-                  Text(
-                    "加载失败",
-                    style: TextStyle(fontSize: 10, color: Colors.grey),
-                  ),
-                ],
+              child: const Center(
+                child: Icon(Icons.broken_image, color: Colors.grey),
               ),
             );
           },
@@ -857,8 +838,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                   fontFamily: "Serif",
                 ),
                 customStylesBuilder: (element) {
-                  if (element.localName == 'img')
-                    return {'display': 'none'}; // 阅读模式隐藏图片，只看字
+                  if (element.localName == 'img') return {'display': 'none'};
                   return null;
                 },
                 onTapUrl: (url) async {
