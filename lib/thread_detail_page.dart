@@ -42,9 +42,7 @@ class ThreadDetailPage extends StatefulWidget {
 class _ThreadDetailPageState extends State<ThreadDetailPage>
     with SingleTickerProviderStateMixin {
   late final WebViewController _hiddenController;
-  // 【新增】还需要一个专门用来查收藏状态的控制器，防止干扰主内容加载
-  late final WebViewController _favCheckController;
-
+  late final WebViewController _favCheckController; // 专门用于收藏操作
   final ScrollController _scrollController = ScrollController();
 
   List<PostItem> _posts = [];
@@ -59,8 +57,8 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
 
   // 收藏状态
   bool _isFavorited = false;
-  String? _favid; // 收藏ID，删除时必须用这个
-  String? _formhash; // 安全校验码，删除时通常需要
+  String? _favid; // 收藏ID
+  // 不需要 formhash 了，直接模拟点击更稳
 
   late AnimationController _fabAnimationController;
   late Animation<double> _fabAnimation;
@@ -84,7 +82,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     );
 
     _initWebView();
-    _initFavCheck(); // 初始化收藏检查
+    _initFavCheck(); // 初始化收藏系统
     _scrollController.addListener(_onScroll);
   }
 
@@ -129,19 +127,12 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setUserAgent(kUserAgent)
       ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageFinished: (url) {
-            // 页面加载完，解析内容
-            _parseHtmlData();
-            // 同时尝试提取页面里的 formhash，这很有用
-            _tryExtractFormHash();
-          },
-        ),
+        NavigationDelegate(onPageFinished: (url) => _parseHtmlData()),
       );
     _loadPage(1);
   }
 
-  // 【新增】专门在后台检查“我的收藏”列表
+  // 【核心修改】初始化收藏控制器
   void _initFavCheck() {
     _favCheckController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
@@ -149,19 +140,28 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (url) {
+            // 1. 如果是在收藏列表页，解析列表
             if (url.contains("do=favorite")) {
               _parseFavList();
+            }
+            // 2. 【新增】如果是在删除确认页 (op=delete)，自动点击“确定”
+            else if (url.contains("op=delete") && url.contains("ac=favorite")) {
+              print("🤖 检测到删除确认页，正在自动点击确定...");
+              // 模拟点击那个 name="deletesubmitbtn" 的按钮
+              _favCheckController.runJavaScript(
+                "var btn = document.querySelector('button[name=\"deletesubmitbtn\"]'); if(btn) btn.click();",
+              );
             }
           },
         ),
       );
-    // 默默加载我的收藏页
+    // 启动时静默加载收藏列表，检查当前帖子状态
     _favCheckController.loadRequest(
       Uri.parse('${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no'),
     );
   }
 
-  // 解析收藏列表，寻找当前帖子是否在里面
+  // 解析收藏列表，查找当前帖子
   Future<void> _parseFavList() async {
     try {
       final String rawHtml =
@@ -178,18 +178,15 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           .replaceAll('\\\\', '\\');
 
       var document = html_parser.parse(cleanHtml);
-
-      // 查找所有收藏项
       var items = document.querySelectorAll('ul[id="favorite_ul"] li');
 
       String? foundFavid;
 
       for (var item in items) {
-        // 找到包含当前 tid 的链接
         var link = item.querySelector('a[href*="tid=${widget.tid}"]');
         if (link != null) {
-          // 找到了！说明已收藏。现在去找删除链接里的 favid
-          // 删除链接通常是: <a href="...op=delete&favid=12345...">
+          // 找到了！提取删除链接里的 favid
+          // 链接示例: home.php?mod=spacecp&ac=favorite&op=delete&favid=190520...
           var delLink = item.querySelector('a[href*="op=delete"]');
           if (delLink != null) {
             String href = delLink.attributes['href'] ?? "";
@@ -203,32 +200,27 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
         }
       }
 
-      if (mounted && foundFavid != null) {
-        setState(() {
-          _isFavorited = true;
-          _favid = foundFavid;
-          print("⭐ 已确认收藏，Favid: $_favid");
-        });
+      if (mounted) {
+        if (foundFavid != null) {
+          setState(() {
+            _isFavorited = true;
+            _favid = foundFavid;
+            print("⭐ 状态同步：已收藏 (Favid: $_favid)");
+          });
+        } else {
+          // 如果没找到，说明没收藏，或者取消成功了
+          if (_isFavorited) {
+            print("🗑️ 状态同步：收藏已移除");
+            setState(() {
+              _isFavorited = false;
+              _favid = null;
+            });
+          }
+        }
       }
     } catch (e) {
       print("收藏检查失败: $e");
     }
-  }
-
-  // 尝试从帖子页面提取 formhash
-  Future<void> _tryExtractFormHash() async {
-    try {
-      final String formhash =
-          await _hiddenController.runJavaScriptReturningResult(
-                "document.querySelector('input[name=formhash]').value",
-              )
-              as String;
-      String cleanHash = formhash.replaceAll('"', '');
-      if (cleanHash.isNotEmpty) {
-        _formhash = cleanHash;
-        print("🔑 Formhash: $_formhash");
-      }
-    } catch (e) {}
   }
 
   void _loadPage(int page) {
@@ -263,52 +255,50 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     _loadPage(_currentPage + 1);
   }
 
-  // 核心功能：处理收藏/取消收藏
+  // 处理收藏点击
   void _handleFavorite() {
-    if (_formhash == null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("数据加载中，请稍后再试")));
-      return;
-    }
-
     _toggleFab(); // 关菜单
 
     if (_isFavorited) {
       // === 取消收藏 ===
       if (_favid != null) {
-        // 执行删除请求 (加上 deletesubmit=true 绕过确认弹窗)
+        // 【修改】去掉 handlekey 参数，强行加载完整的 HTML 页面
+        // 这样 WebViewController 就能在 onPageFinished 里捕获到页面，并执行自动点击
         String delUrl =
-            "${_baseUrl}home.php?mod=spacecp&ac=favorite&op=delete&favid=$_favid&type=all&deletesubmit=true&formhash=$_formhash&handlekey=favorite_delete";
-        print("🗑️ 取消收藏: $delUrl");
-        // 借助 favController 发送请求，以免干扰主页面
+            "${_baseUrl}home.php?mod=spacecp&ac=favorite&op=delete&favid=$_favid&type=all";
+        print("🗑️ 请求删除页: $delUrl");
+
         _favCheckController.loadRequest(Uri.parse(delUrl));
 
-        setState(() {
-          _isFavorited = false;
-          _favid = null;
-        });
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text("已取消收藏")));
+        ).showSnackBar(const SnackBar(content: Text("正在取消收藏...")));
+
+        // 3秒后刷新收藏列表，确认是否删除成功
+        Future.delayed(const Duration(seconds: 3), () {
+          _favCheckController.loadRequest(
+            Uri.parse(
+              '${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no',
+            ),
+          );
+        });
       }
     } else {
       // === 添加收藏 ===
-      // 模拟点击页面上的收藏按钮 (最稳)
       _hiddenController.runJavaScript(
         "if(document.querySelector('#k_favorite')) document.querySelector('#k_favorite').click();",
       );
-
-      setState(() {
-        _isFavorited = true;
-      });
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text("已添加到收藏")));
+      ).showSnackBar(const SnackBar(content: Text("已发送收藏请求")));
 
-      // 延迟刷新一下收藏列表以获取新的 favid (为了下次能取消)
-      Future.delayed(const Duration(seconds: 2), () {
-        _favCheckController.reload();
+      // 3秒后刷新收藏列表，获取新生成的 favid
+      Future.delayed(const Duration(seconds: 3), () {
+        _favCheckController.loadRequest(
+          Uri.parse(
+            '${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no',
+          ),
+        );
       });
     }
   }
@@ -320,7 +310,6 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                 "document.documentElement.outerHTML",
               )
               as String;
-
       String cleanHtml = rawHtml;
       if (cleanHtml.startsWith('"'))
         cleanHtml = cleanHtml.substring(1, cleanHtml.length - 1);
@@ -411,10 +400,6 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
             RegExp(r'<div class="tip.*?>.*?</div>', dotAll: true),
             '',
           );
-          content = content.replaceAll(
-            RegExp(r'<i class="pstatus">.*?</i>', dotAll: true),
-            '',
-          );
           content = content.replaceAll('ignore_js_op', 'div');
 
           newPosts.add(
@@ -434,7 +419,6 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
         }
       }
 
-      // 检测下一页
       var nextBtn = document.querySelector('.pg .nxt');
       bool hasNextPage = nextBtn != null;
 
@@ -521,7 +505,6 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
             width: 0,
             child: WebViewWidget(controller: _hiddenController),
           ),
-          // 收藏检查用的 WebView
           SizedBox(
             height: 0,
             width: 0,
@@ -557,15 +540,12 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                 },
               ),
               const SizedBox(height: 12),
-
-              // 【修改】收藏/取消收藏按钮
               _buildFabItem(
                 icon: _isFavorited ? Icons.star : Icons.star_border,
                 label: _isFavorited ? "取消收藏" : "收藏本帖",
                 color: _isFavorited ? Colors.yellow : null,
-                onTap: _handleFavorite, // 调用新逻辑
+                onTap: _handleFavorite,
               ),
-
               const SizedBox(height: 12),
               _buildFabItem(
                 icon: _isOnlyLandlord ? Icons.people : Icons.person,
@@ -760,12 +740,6 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                       'max-width': '100%',
                       'height': 'auto',
                       'border-radius': '4px',
-                    };
-                  if (element.localName == 'blockquote')
-                    return {
-                      'background-color': '#F5F5F5',
-                      'border-left': '3px solid #DDD',
-                      'padding': '8px',
                     };
                   return null;
                 },
