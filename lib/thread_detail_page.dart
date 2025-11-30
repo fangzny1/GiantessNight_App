@@ -310,6 +310,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                 "document.documentElement.outerHTML",
               )
               as String;
+
       String cleanHtml = rawHtml;
       if (cleanHtml.startsWith('"'))
         cleanHtml = cleanHtml.substring(1, cleanHtml.length - 1);
@@ -351,19 +352,20 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
 
           var timeNode = div.querySelector('em[id^="authorposton"]');
           String time = timeNode?.text.replaceAll("发表于 ", "").trim() ?? "";
-          var spanTime = timeNode?.querySelector('span');
-          if (spanTime != null && spanTime.attributes.containsKey('title')) {
-            time = spanTime.attributes['title']!;
-          }
-
           var floorNode = div.querySelector('.pi strong a em');
           String floorText = floorNode?.text ?? "${floorIndex++}楼";
 
           var contentNode = div.querySelector('td.t_f');
           String content = contentNode?.innerHtml ?? "";
 
+          // === 图片修复终极版 ===
+
+          // 1. 基础清理
           content = content.replaceAll(r'\n', '<br>');
-          content = content.replaceAll('lazyloaded="true"', '');
+          content = content.replaceAll('lazyloaded="true"', ''); // 移除懒加载标记，强制刷新
+          content = content.replaceAll('ignore_js_op', 'div');
+
+          // 2. 补全所有相对路径 (src, file, zoomfile 全都补全，以防万一)
           content = content.replaceAll(
             'src="data/attachment',
             'src="${_baseUrl}data/attachment',
@@ -377,21 +379,42 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
             'zoomfile="${_baseUrl}data/attachment',
           );
 
-          content = content.replaceAllMapped(RegExp(r'zoomfile="([^"]+)"'), (
-            match,
-          ) {
-            String url = match.group(1)!;
-            if (!url.startsWith('http')) url = _baseUrl + url;
-            return 'src="$url"';
-          });
-          content = content.replaceAllMapped(RegExp(r'file="([^"]+)"'), (
-            match,
-          ) {
-            String url = match.group(1)!;
-            if (!url.startsWith('http')) url = _baseUrl + url;
-            return 'src="$url"';
-          });
+          // 3. 【关键回退】
+          // 之前是强行用 zoomfile 替换 src，现在我们改为：
+          // 如果 src 是 "loading.gif" 或 "none.gif" 这种占位图，才去替换！
+          // 否则就保留 src（通常是 .thumb.jpg，虽然糊一点但肯定能加载）
 
+          // 替换 loading 占位图 -> file (原图/中图)
+          content = content.replaceAllMapped(
+            RegExp(
+              r'<img[^>]+src="[^"]*(loading|none)\.gif"[^>]+file="([^"]+)"[^>]*>',
+            ),
+            (match) {
+              return match
+                  .group(0)!
+                  .replaceFirst(
+                    RegExp(r'src="[^"]*"'),
+                    'src="${match.group(2)}"',
+                  );
+            },
+          );
+
+          // 替换 loading 占位图 -> zoomfile (高清图) - 如果没有 file 只有 zoomfile
+          content = content.replaceAllMapped(
+            RegExp(
+              r'<img[^>]+src="[^"]*(loading|none)\.gif"[^>]+zoomfile="([^"]+)"[^>]*>',
+            ),
+            (match) {
+              return match
+                  .group(0)!
+                  .replaceFirst(
+                    RegExp(r'src="[^"]*"'),
+                    'src="${match.group(2)}"',
+                  );
+            },
+          );
+
+          // 4. 清理干扰脚本
           content = content.replaceAll(
             RegExp(r'<script.*?>.*?</script>', dotAll: true),
             '',
@@ -400,7 +423,10 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
             RegExp(r'<div class="tip.*?>.*?</div>', dotAll: true),
             '',
           );
-          content = content.replaceAll('ignore_js_op', 'div');
+          content = content.replaceAll(
+            RegExp(r'<i class="pstatus">.*?</i>', dotAll: true),
+            '',
+          );
 
           newPosts.add(
             PostItem(
@@ -431,14 +457,11 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
               if (!_posts.any((old) => old.pid == p.pid)) _posts.add(p);
             }
           }
-
           if (!hasNextPage)
             _hasMore = false;
           else if (newPosts.isNotEmpty)
             _currentPage++;
-
           if (newPosts.isEmpty) _hasMore = false;
-
           _isLoading = false;
           _isLoadingMore = false;
         });
