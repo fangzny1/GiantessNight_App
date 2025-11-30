@@ -7,6 +7,8 @@ import 'forum_model.dart';
 import 'thread_list_page.dart';
 import 'search_page.dart'; // 引入搜索页
 import 'favorite_page.dart'; // 引入收藏页
+import 'theme.dart';
+import 'package:provider/provider.dart';
 
 final ValueNotifier<String> currentUser = ValueNotifier("未登录");
 final GlobalKey<_ForumHomePageState> forumKey = GlobalKey();
@@ -15,7 +17,26 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
   currentUser.value = prefs.getString('username') ?? "未登录";
-  runApp(const MyApp());
+
+  // 加载保存的主题模式
+  ThemeMode initialThemeMode;
+  String? savedThemeMode = prefs.getString('themeMode');
+  if (savedThemeMode == 'dark') {
+    initialThemeMode = ThemeMode.dark;
+  } else if (savedThemeMode == 'light') {
+    initialThemeMode = ThemeMode.light;
+  } else {
+    // 默认为 light
+    initialThemeMode = ThemeMode.light;
+  }
+
+  runApp(
+    // 注入 ThemeProvider
+    ChangeNotifierProvider(
+      create: (context) => ThemeProvider(initialThemeMode),
+      child: const MyApp(),
+    ),
+  );
 }
 
 class MyApp extends StatelessWidget {
@@ -23,16 +44,17 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'GiantessNight',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF6750A4),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-      ),
-      home: const MainScreen(),
+    // 【修改】使用 Consumer 来监听 ThemeProvider 的变化并构建 MaterialApp
+    return Consumer<ThemeProvider>(
+      builder: (context, themeProvider, child) {
+        return MaterialApp(
+          title: 'GiantessNight',
+          theme: Themes.light,
+          darkTheme: Themes.dark,
+          themeMode: themeProvider.themeMode,
+          home: const MainScreen(),
+        );
+      },
     );
   }
 }
@@ -289,6 +311,8 @@ class ProfilePage extends StatelessWidget {
         valueListenable: currentUser,
         builder: (context, username, child) {
           bool isLogin = username != "未登录";
+          final themeProvider = Provider.of<ThemeProvider>(context);
+
           return ListView(
             children: [
               const SizedBox(height: 40),
@@ -325,6 +349,23 @@ class ProfilePage extends StatelessWidget {
                     );
                   },
                 ),
+              const Divider(),
+
+              // 【新增】主题切换按钮
+              ListTile(
+                leading: Icon(
+                  themeProvider.themeMode == ThemeMode.dark
+                      ? Icons.dark_mode
+                      : Icons.light_mode,
+                ),
+                title: const Text("深色模式"),
+                trailing: Switch(
+                  value: themeProvider.themeMode == ThemeMode.dark,
+                  onChanged: (bool value) {
+                    themeProvider.toggleTheme(value);
+                  },
+                ),
+              ),
               const Divider(),
 
               if (!isLogin)
