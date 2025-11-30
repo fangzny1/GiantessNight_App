@@ -42,7 +42,6 @@ class ThreadDetailPage extends StatefulWidget {
 class _ThreadDetailPageState extends State<ThreadDetailPage>
     with SingleTickerProviderStateMixin {
   late final WebViewController _hiddenController;
-  late final WebViewController _favCheckController; // 专门用于收藏操作
   final ScrollController _scrollController = ScrollController();
 
   List<PostItem> _posts = [];
@@ -55,10 +54,9 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   bool _isReaderMode = false;
   bool _isFabOpen = false;
 
-  // 收藏状态
   bool _isFavorited = false;
-  String? _favid; // 收藏ID
-  // 不需要 formhash 了，直接模拟点击更稳
+  String? _favid;
+  String? _formhash;
 
   late AnimationController _fabAnimationController;
   late Animation<double> _fabAnimation;
@@ -80,10 +78,80 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       parent: _fabAnimationController,
       curve: Curves.easeInOut,
     );
-
     _initWebView();
-    _initFavCheck(); // 初始化收藏系统
+    _initFavCheck();
     _scrollController.addListener(_onScroll);
+  }
+
+  late final WebViewController _favCheckController;
+
+  void _initFavCheck() {
+    _favCheckController = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setUserAgent(kUserAgent)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageFinished: (url) {
+            if (url.contains("do=favorite"))
+              _parseFavList();
+            else if (url.contains("op=delete") && url.contains("ac=favorite")) {
+              _favCheckController.runJavaScript(
+                "var btn = document.querySelector('button[name=\"deletesubmitbtn\"]'); if(btn) btn.click();",
+              );
+            }
+          },
+        ),
+      );
+    _favCheckController.loadRequest(
+      Uri.parse('${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no'),
+    );
+  }
+
+  Future<void> _parseFavList() async {
+    try {
+      final String rawHtml =
+          await _favCheckController.runJavaScriptReturningResult(
+                "document.documentElement.outerHTML",
+              )
+              as String;
+      String cleanHtml = _cleanHtml(rawHtml);
+      var document = html_parser.parse(cleanHtml);
+      var items = document.querySelectorAll('ul[id="favorite_ul"] li');
+      String? foundFavid;
+
+      for (var item in items) {
+        var link = item.querySelector('a[href*="tid=${widget.tid}"]');
+        if (link != null) {
+          var delLink = item.querySelector('a[href*="op=delete"]');
+          if (delLink != null) {
+            String href = delLink.attributes['href'] ?? "";
+            RegExp favidReg = RegExp(r'favid=(\d+)');
+            var match = favidReg.firstMatch(href);
+            if (match != null) {
+              foundFavid = match.group(1);
+              break;
+            }
+          }
+        }
+      }
+      if (mounted && foundFavid != null) {
+        setState(() {
+          _isFavorited = true;
+          _favid = foundFavid;
+        });
+      }
+    } catch (e) {}
+  }
+
+  // 工具：清理 HTML 转义
+  String _cleanHtml(String raw) {
+    String clean = raw;
+    if (clean.startsWith('"')) clean = clean.substring(1, clean.length - 1);
+    clean = clean
+        .replaceAll('\\u003C', '<')
+        .replaceAll('\\"', '"')
+        .replaceAll('\\\\', '\\');
+    return clean;
   }
 
   @override
@@ -127,100 +195,26 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setUserAgent(kUserAgent)
       ..setNavigationDelegate(
-        NavigationDelegate(onPageFinished: (url) => _parseHtmlData()),
+        NavigationDelegate(
+          onPageFinished: (url) {
+            _parseHtmlData();
+            _tryExtractFormHash();
+          },
+        ),
       );
     _loadPage(1);
   }
 
-  // 【核心修改】初始化收藏控制器
-  void _initFavCheck() {
-    _favCheckController = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(kUserAgent)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageFinished: (url) {
-            // 1. 如果是在收藏列表页，解析列表
-            if (url.contains("do=favorite")) {
-              _parseFavList();
-            }
-            // 2. 【新增】如果是在删除确认页 (op=delete)，自动点击“确定”
-            else if (url.contains("op=delete") && url.contains("ac=favorite")) {
-              print("🤖 检测到删除确认页，正在自动点击确定...");
-              // 模拟点击那个 name="deletesubmitbtn" 的按钮
-              _favCheckController.runJavaScript(
-                "var btn = document.querySelector('button[name=\"deletesubmitbtn\"]'); if(btn) btn.click();",
-              );
-            }
-          },
-        ),
-      );
-    // 启动时静默加载收藏列表，检查当前帖子状态
-    _favCheckController.loadRequest(
-      Uri.parse('${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no'),
-    );
-  }
-
-  // 解析收藏列表，查找当前帖子
-  Future<void> _parseFavList() async {
+  Future<void> _tryExtractFormHash() async {
     try {
-      final String rawHtml =
-          await _favCheckController.runJavaScriptReturningResult(
-                "document.documentElement.outerHTML",
+      final String formhash =
+          await _hiddenController.runJavaScriptReturningResult(
+                "document.querySelector('input[name=formhash]').value",
               )
               as String;
-      String cleanHtml = rawHtml;
-      if (cleanHtml.startsWith('"'))
-        cleanHtml = cleanHtml.substring(1, cleanHtml.length - 1);
-      cleanHtml = cleanHtml
-          .replaceAll('\\u003C', '<')
-          .replaceAll('\\"', '"')
-          .replaceAll('\\\\', '\\');
-
-      var document = html_parser.parse(cleanHtml);
-      var items = document.querySelectorAll('ul[id="favorite_ul"] li');
-
-      String? foundFavid;
-
-      for (var item in items) {
-        var link = item.querySelector('a[href*="tid=${widget.tid}"]');
-        if (link != null) {
-          // 找到了！提取删除链接里的 favid
-          // 链接示例: home.php?mod=spacecp&ac=favorite&op=delete&favid=190520...
-          var delLink = item.querySelector('a[href*="op=delete"]');
-          if (delLink != null) {
-            String href = delLink.attributes['href'] ?? "";
-            RegExp favidReg = RegExp(r'favid=(\d+)');
-            var match = favidReg.firstMatch(href);
-            if (match != null) {
-              foundFavid = match.group(1);
-              break;
-            }
-          }
-        }
-      }
-
-      if (mounted) {
-        if (foundFavid != null) {
-          setState(() {
-            _isFavorited = true;
-            _favid = foundFavid;
-            print("⭐ 状态同步：已收藏 (Favid: $_favid)");
-          });
-        } else {
-          // 如果没找到，说明没收藏，或者取消成功了
-          if (_isFavorited) {
-            print("🗑️ 状态同步：收藏已移除");
-            setState(() {
-              _isFavorited = false;
-              _favid = null;
-            });
-          }
-        }
-      }
-    } catch (e) {
-      print("收藏检查失败: $e");
-    }
+      String cleanHash = formhash.replaceAll('"', '');
+      if (cleanHash.isNotEmpty) _formhash = cleanHash;
+    } catch (e) {}
   }
 
   void _loadPage(int page) {
@@ -255,50 +249,33 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     _loadPage(_currentPage + 1);
   }
 
-  // 处理收藏点击
   void _handleFavorite() {
-    _toggleFab(); // 关菜单
-
+    _toggleFab();
     if (_isFavorited) {
-      // === 取消收藏 ===
       if (_favid != null) {
-        // 【修改】去掉 handlekey 参数，强行加载完整的 HTML 页面
-        // 这样 WebViewController 就能在 onPageFinished 里捕获到页面，并执行自动点击
         String delUrl =
             "${_baseUrl}home.php?mod=spacecp&ac=favorite&op=delete&favid=$_favid&type=all";
-        print("🗑️ 请求删除页: $delUrl");
-
         _favCheckController.loadRequest(Uri.parse(delUrl));
-
+        setState(() {
+          _isFavorited = false;
+          _favid = null;
+        });
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text("正在取消收藏...")));
-
-        // 3秒后刷新收藏列表，确认是否删除成功
-        Future.delayed(const Duration(seconds: 3), () {
-          _favCheckController.loadRequest(
-            Uri.parse(
-              '${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no',
-            ),
-          );
-        });
+        ).showSnackBar(const SnackBar(content: Text("已取消收藏")));
       }
     } else {
-      // === 添加收藏 ===
       _hiddenController.runJavaScript(
         "if(document.querySelector('#k_favorite')) document.querySelector('#k_favorite').click();",
       );
+      setState(() {
+        _isFavorited = true;
+      });
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text("已发送收藏请求")));
-
-      // 3秒后刷新收藏列表，获取新生成的 favid
       Future.delayed(const Duration(seconds: 3), () {
-        _favCheckController.loadRequest(
-          Uri.parse(
-            '${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no',
-          ),
-        );
+        _favCheckController.reload();
       });
     }
   }
@@ -310,14 +287,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                 "document.documentElement.outerHTML",
               )
               as String;
-
-      String cleanHtml = rawHtml;
-      if (cleanHtml.startsWith('"'))
-        cleanHtml = cleanHtml.substring(1, cleanHtml.length - 1);
-      cleanHtml = cleanHtml
-          .replaceAll('\\u003C', '<')
-          .replaceAll('\\"', '"')
-          .replaceAll('\\\\', '\\');
+      String cleanHtml = _cleanHtml(rawHtml);
 
       var document = html_parser.parse(cleanHtml);
       List<PostItem> newPosts = [];
@@ -352,20 +322,36 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
 
           var timeNode = div.querySelector('em[id^="authorposton"]');
           String time = timeNode?.text.replaceAll("发表于 ", "").trim() ?? "";
+          var spanTime = timeNode?.querySelector('span');
+          if (spanTime != null && spanTime.attributes.containsKey('title')) {
+            time = spanTime.attributes['title']!;
+          }
           var floorNode = div.querySelector('.pi strong a em');
           String floorText = floorNode?.text ?? "${floorIndex++}楼";
 
           var contentNode = div.querySelector('td.t_f');
           String content = contentNode?.innerHtml ?? "";
 
-          // === 图片修复终极版 ===
-
-          // 1. 基础清理
+          // === 【修正】图片解析逻辑 ===
+          // 1. 换行
           content = content.replaceAll(r'\n', '<br>');
-          content = content.replaceAll('lazyloaded="true"', ''); // 移除懒加载标记，强制刷新
+          // 2. 移除干扰
+          content = content.replaceAll('lazyloaded="true"', '');
           content = content.replaceAll('ignore_js_op', 'div');
+          content = content.replaceAll(
+            RegExp(r'<script.*?>.*?</script>', dotAll: true),
+            '',
+          );
+          content = content.replaceAll(
+            RegExp(r'<div class="tip.*?>.*?</div>', dotAll: true),
+            '',
+          );
+          content = content.replaceAll(
+            RegExp(r'<i class="pstatus">.*?</i>', dotAll: true),
+            '',
+          );
 
-          // 2. 补全所有相对路径 (src, file, zoomfile 全都补全，以防万一)
+          // 3. 补全所有相对路径 (不删除 src, 保留所有属性给 HtmlWidget 挑选)
           content = content.replaceAll(
             'src="data/attachment',
             'src="${_baseUrl}data/attachment',
@@ -379,54 +365,33 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
             'zoomfile="${_baseUrl}data/attachment',
           );
 
-          // 3. 【关键回退】
-          // 之前是强行用 zoomfile 替换 src，现在我们改为：
-          // 如果 src 是 "loading.gif" 或 "none.gif" 这种占位图，才去替换！
-          // 否则就保留 src（通常是 .thumb.jpg，虽然糊一点但肯定能加载）
-
-          // 替换 loading 占位图 -> file (原图/中图)
-          content = content.replaceAllMapped(
-            RegExp(
-              r'<img[^>]+src="[^"]*(loading|none)\.gif"[^>]+file="([^"]+)"[^>]*>',
-            ),
-            (match) {
-              return match
-                  .group(0)!
-                  .replaceFirst(
-                    RegExp(r'src="[^"]*"'),
-                    'src="${match.group(2)}"',
-                  );
-            },
-          );
-
-          // 替换 loading 占位图 -> zoomfile (高清图) - 如果没有 file 只有 zoomfile
-          content = content.replaceAllMapped(
-            RegExp(
-              r'<img[^>]+src="[^"]*(loading|none)\.gif"[^>]+zoomfile="([^"]+)"[^>]*>',
-            ),
-            (match) {
-              return match
-                  .group(0)!
-                  .replaceFirst(
-                    RegExp(r'src="[^"]*"'),
-                    'src="${match.group(2)}"',
-                  );
-            },
-          );
-
-          // 4. 清理干扰脚本
-          content = content.replaceAll(
-            RegExp(r'<script.*?>.*?</script>', dotAll: true),
-            '',
-          );
-          content = content.replaceAll(
-            RegExp(r'<div class="tip.*?>.*?</div>', dotAll: true),
-            '',
-          );
-          content = content.replaceAll(
-            RegExp(r'<i class="pstatus">.*?</i>', dotAll: true),
-            '',
-          );
+          // 4. 处理占位图 (loading.gif/none.gif)
+          // 如果 src 是占位图，HtmlWidget 可能会显示一个转圈。
+          // 我们这里做一个替换：如果 src 是占位图，直接把它换成 file 或 zoomfile
+          // 但如果 src 本身就是缩略图 (.thumb.jpg)，则不动它
+          content = content.replaceAllMapped(RegExp(r'<img[^>]+>'), (match) {
+            String imgTag = match.group(0)!;
+            // 只有当 src 是占位符时才强行替换
+            if (imgTag.contains('loading.gif') || imgTag.contains('none.gif')) {
+              // 优先找 file (普通图/缩略图)，因为它加载成功率高
+              RegExp fileReg = RegExp(r'file="([^"]+)"');
+              var fileMatch = fileReg.firstMatch(imgTag);
+              if (fileMatch != null) {
+                String url = fileMatch.group(1)!;
+                if (!url.startsWith('http')) url = _baseUrl + url;
+                return '<img src="$url">';
+              }
+              // 没 file 找 zoomfile
+              RegExp zoomReg = RegExp(r'zoomfile="([^"]+)"');
+              var zoomMatch = zoomReg.firstMatch(imgTag);
+              if (zoomMatch != null) {
+                String url = zoomMatch.group(1)!;
+                if (!url.startsWith('http')) url = _baseUrl + url;
+                return '<img src="$url">';
+              }
+            }
+            return imgTag; // 其他情况保留原样 (保留 attributes 供 customWidgetBuilder 使用)
+          });
 
           newPosts.add(
             PostItem(
@@ -527,11 +492,6 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
             height: 0,
             width: 0,
             child: WebViewWidget(controller: _hiddenController),
-          ),
-          SizedBox(
-            height: 0,
-            width: 0,
-            child: WebViewWidget(controller: _favCheckController),
           ),
         ],
       ),
@@ -651,19 +611,17 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   }
 
   Widget _buildFooter() {
-    if (_hasMore) {
+    if (_hasMore)
       return const Padding(
         padding: EdgeInsets.all(16),
         child: Center(child: CircularProgressIndicator()),
       );
-    } else {
-      return const Padding(
-        padding: EdgeInsets.all(30),
-        child: Center(
-          child: Text("--- 全文完 ---", style: TextStyle(color: Colors.grey)),
-        ),
-      );
-    }
+    return const Padding(
+      padding: EdgeInsets.all(30),
+      child: Center(
+        child: Text("--- 全文完 ---", style: TextStyle(color: Colors.grey)),
+      ),
+    );
   }
 
   Widget _buildPostCard(PostItem post) {
@@ -753,20 +711,53 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
               ],
             ),
             const SizedBox(height: 12),
+
+            // 【核心】自定义图片加载逻辑
             SelectionArea(
               child: HtmlWidget(
                 post.contentHtml,
                 textStyle: const TextStyle(fontSize: 16, height: 1.6),
+
+                customWidgetBuilder: (element) {
+                  // 拦截 img 标签，自己构建 Image Widget
+                  if (element.localName == 'img') {
+                    String src = element.attributes['src'] ?? '';
+                    String zoomfile = element.attributes['zoomfile'] ?? '';
+                    String file = element.attributes['file'] ?? '';
+
+                    // 优先级：zoomfile (高清) > file (普通) > src (如果src不是loading)
+                    String urlToLoad = "";
+
+                    if (zoomfile.isNotEmpty) {
+                      urlToLoad = zoomfile;
+                    } else if (file.isNotEmpty) {
+                      urlToLoad = file;
+                    } else if (src.isNotEmpty &&
+                        !src.contains("loading.gif") &&
+                        !src.contains("none.gif")) {
+                      urlToLoad = src;
+                    }
+
+                    if (urlToLoad.isNotEmpty) {
+                      // 补全域名
+                      if (!urlToLoad.startsWith('http'))
+                        urlToLoad = _baseUrl + urlToLoad;
+
+                      return _buildClickableImage(urlToLoad);
+                    }
+                  }
+                  return null;
+                },
+
                 customStylesBuilder: (element) {
-                  if (element.localName == 'img')
+                  if (element.localName == 'blockquote')
                     return {
-                      'max-width': '100%',
-                      'height': 'auto',
-                      'border-radius': '4px',
+                      'background-color': '#F5F5F5',
+                      'border-left': '3px solid #DDD',
+                      'padding': '8px',
                     };
                   return null;
                 },
-                onTapImage: (data) => print("看图: ${data.sources.first.url}"),
                 onTapUrl: (url) async {
                   await _launchURL(url);
                   return true;
@@ -774,6 +765,50 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  // 构建一个支持点击查看大图，且有加载失败重试机制的图片组件
+  Widget _buildClickableImage(String url) {
+    return GestureDetector(
+      onTap: () => print("点击图片: $url"), // 这里以后可以接大图预览
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 8),
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(8)),
+        child: Image.network(
+          url,
+          headers: const {'User-Agent': kUserAgent}, // 必须带UA，否则403
+          fit: BoxFit.contain,
+          loadingBuilder: (context, child, progress) {
+            if (progress == null) return child;
+            return Container(
+              height: 150,
+              color: Colors.grey.shade100,
+              child: const Center(child: CircularProgressIndicator()),
+            );
+          },
+          errorBuilder: (context, error, stackTrace) {
+            // 如果高清图加载失败，这里可以放一个占位图或者提示
+            return Container(
+              height: 100,
+              color: Colors.grey.shade200,
+              alignment: Alignment.center,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: const [
+                  Icon(Icons.broken_image, color: Colors.grey),
+                  SizedBox(height: 4),
+                  Text(
+                    "加载失败",
+                    style: TextStyle(fontSize: 10, color: Colors.grey),
+                  ),
+                ],
+              ),
+            );
+          },
         ),
       ),
     );
@@ -823,7 +858,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                 ),
                 customStylesBuilder: (element) {
                   if (element.localName == 'img')
-                    return {'max-width': '100%', 'height': 'auto'};
+                    return {'display': 'none'}; // 阅读模式隐藏图片，只看字
                   return null;
                 },
                 onTapUrl: (url) async {
