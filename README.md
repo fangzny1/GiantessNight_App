@@ -4,14 +4,6 @@
 
 📱 GiantessNight 第三方客户端 (GN Forum App)
 
-![alt text](https://img.shields.org/badge/Flutter-3.0%2B-blue.svg)
-
-
-![alt text](https://img.shields.org/badge/Platform-Android-green.svg)
-
-
-![alt text](https://img.shields.org/badge/License-MIT-purple.svg)
-
 为了在被窝里看帖更爽，我手搓了一个 GN 论坛专属 APP！
 
 这是一个基于 Flutter 开发的 GiantessNight 论坛第三方客户端。旨在解决 Discuz! 原生手机网页版体验不佳、翻页繁琐、图片加载失败等痛点，提供丝滑的原生阅读体验。
