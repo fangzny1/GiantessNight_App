@@ -39,18 +39,6 @@
 
 安全登录：基于 WebView 的 Cookie 同步登录，不收集任何账号密码信息。
 
-📸 应用截图 (Screenshots)
-首页浏览	帖子详情	阅读模式	个人中心
-
-![alt text](https://via.placeholder.com/200x400?text=Home)
-	
-![alt text](https://via.placeholder.com/200x400?text=Detail)
-	
-![alt text](https://via.placeholder.com/200x400?text=Reader)
-	
-![alt text](https://via.placeholder.com/200x400?text=Profile)
-
-(注：请将截图放入 screenshots 文件夹或替换上面的链接)
 
 📥 下载安装
 
@@ -58,9 +46,8 @@
 
 或者访问蓝奏云下载：
 
-链接: 点击跳转
-
-密码: i6z6
+https://wwbnh.lanzout.com/iqnoG3cydk8b
+密码:6e35
 
 🛠️ 技术栈 (Tech Stack)
 
