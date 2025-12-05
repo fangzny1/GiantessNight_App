@@ -4,8 +4,11 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:flutter_widget_from_html/flutter_widget_from_html.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
 import 'login_page.dart';
 import 'user_detail_page.dart';
+import 'forum_model.dart';
 
 class PostItem {
   final String pid;
@@ -32,8 +35,14 @@ class PostItem {
 class ThreadDetailPage extends StatefulWidget {
   final String tid;
   final String subject;
+  final int initialPage;
 
-  const ThreadDetailPage({super.key, required this.tid, required this.subject});
+  const ThreadDetailPage({
+    super.key,
+    required this.tid,
+    required this.subject,
+    this.initialPage = 1,
+  });
 
   @override
   State<ThreadDetailPage> createState() => _ThreadDetailPageState();
@@ -58,22 +67,23 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   bool _isFavorited = false;
   String? _favid;
 
-  // 保存 Cookie
-  String _cookieString = "";
+  double _fontSize = 16.0;
+  Color _readerBgColor = const Color(0xFFFAF9DE);
+  Color _readerTextColor = Colors.black87;
 
   late AnimationController _fabAnimationController;
   late Animation<double> _fabAnimation;
 
   String _errorMsg = "";
-  int _currentPage = 1;
+  late int _currentPage;
   String? _landlordUid;
 
-  // 强制使用带 www 的域名
   final String _baseUrl = "https://www.giantessnight.com/gnforum2012/";
 
   @override
   void initState() {
     super.initState();
+    _currentPage = widget.initialPage;
     _fabAnimationController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 260),
@@ -106,20 +116,22 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   void _toggleFab() {
     setState(() {
       _isFabOpen = !_isFabOpen;
-      if (_isFabOpen)
+      if (_isFabOpen) {
         _fabAnimationController.forward();
-      else
+      } else {
         _fabAnimationController.reverse();
+      }
     });
   }
 
   void _toggleReaderMode() {
     setState(() {
       _isReaderMode = !_isReaderMode;
-      if (_isReaderMode)
+      if (_isReaderMode) {
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      else
+      } else {
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      }
     });
     _toggleFab();
   }
@@ -129,9 +141,13 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setUserAgent(kUserAgent)
       ..setNavigationDelegate(
-        NavigationDelegate(onPageFinished: (url) => _parseHtmlData()),
+        NavigationDelegate(
+          onPageFinished: (url) {
+            _parseHtmlData();
+          },
+        ),
       );
-    _loadPage(1);
+    _loadPage(_currentPage);
   }
 
   void _initFavCheck() {
@@ -141,9 +157,10 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (url) {
-            if (url.contains("do=favorite"))
+            if (url.contains("do=favorite")) {
               _parseFavList();
-            else if (url.contains("op=delete") && url.contains("ac=favorite")) {
+            } else if (url.contains("op=delete") &&
+                url.contains("ac=favorite")) {
               _favCheckController.runJavaScript(
                 "var btn = document.querySelector('button[name=\"deletesubmitbtn\"]'); if(btn) btn.click();",
               );
@@ -184,68 +201,40 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
         }
       }
       if (mounted) {
-        if (foundFavid != null)
+        if (foundFavid != null) {
           setState(() {
             _isFavorited = true;
             _favid = foundFavid;
           });
-        else if (_isFavorited)
+        } else if (_isFavorited) {
           setState(() {
             _isFavorited = false;
             _favid = null;
           });
+        }
       }
-    } catch (e) {}
-  }
-
-  String _cleanHtml(String raw) {
-    String clean = raw;
-    if (clean.startsWith('"')) clean = clean.substring(1, clean.length - 1);
-    clean = clean
-        .replaceAll('\\u003C', '<')
-        .replaceAll('\\"', '"')
-        .replaceAll('\\\\', '\\');
-    return clean;
-  }
-
-  // 【核心工具】强制修复 URL：补全 www，补全域名
-  String _fixUrl(String url) {
-    if (url.isEmpty) return "";
-
-    String fixedUrl = url;
-
-    // 1. 补全相对路径
-    if (!fixedUrl.startsWith('http')) {
-      if (fixedUrl.startsWith('/')) {
-        fixedUrl = "https://www.giantessnight.com$fixedUrl";
-      } else {
-        fixedUrl = _baseUrl + fixedUrl;
-      }
+    } catch (e) {
+      // 忽略错误
     }
-
-    // 2. 强制加上 www (解决 Cloudflare 5秒盾和登录失效的关键！)
-    if (fixedUrl.contains("https://giantessnight.com")) {
-      fixedUrl = fixedUrl.replaceFirst(
-        "https://giantessnight.com",
-        "https://www.giantessnight.com",
-      );
-    }
-
-    return fixedUrl;
   }
 
   void _loadPage(int page) {
-    if (!_hasMore && page > 1) return;
+    if (!_hasMore && page > _currentPage) return;
     String url =
         '${_baseUrl}forum.php?mod=viewthread&tid=${widget.tid}&extra=page%3D1&page=$page&mobile=no';
     if (_isOnlyLandlord && _landlordUid != null)
       url += '&authorid=$_landlordUid';
-    print("🚀 加载帖子: $url");
+    print("🚀 加载: $url");
     _hiddenController.loadRequest(Uri.parse(url));
   }
 
   void _toggleOnlyLandlord() {
-    if (_landlordUid == null) return;
+    if (_landlordUid == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("未找到楼主")));
+      return;
+    }
     setState(() {
       _isOnlyLandlord = !_isOnlyLandlord;
       _posts.clear();
@@ -273,32 +262,28 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
         String delUrl =
             "${_baseUrl}home.php?mod=spacecp&ac=favorite&op=delete&favid=$_favid&type=all";
         _favCheckController.loadRequest(Uri.parse(delUrl));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text("正在取消收藏...")));
+        Future.delayed(
+          const Duration(seconds: 3),
+          () => _favCheckController.reload(),
+        );
         setState(() {
           _isFavorited = false;
           _favid = null;
         });
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text("已取消收藏")));
-        Future.delayed(
-          const Duration(seconds: 3),
-          () => _favCheckController.loadRequest(
-            Uri.parse(
-              '${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no',
-            ),
-          ),
-        );
       }
     } else {
       _hiddenController.runJavaScript(
         "if(document.querySelector('#k_favorite')) document.querySelector('#k_favorite').click();",
       );
-      setState(() {
-        _isFavorited = true;
-      });
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text("已发送收藏请求")));
+      setState(() {
+        _isFavorited = true;
+      });
       Future.delayed(
         const Duration(seconds: 3),
         () => _favCheckController.reload(),
@@ -308,14 +293,6 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
 
   Future<void> _parseHtmlData() async {
     try {
-      // 抓取 Cookie (用于图片加载)
-      final Object cookieObj = await _hiddenController
-          .runJavaScriptReturningResult('document.cookie');
-      String rawCookie = cookieObj.toString();
-      if (rawCookie.startsWith('"'))
-        rawCookie = rawCookie.substring(1, rawCookie.length - 1);
-      _cookieString = rawCookie;
-
       final String rawHtml =
           await _hiddenController.runJavaScriptReturningResult(
                 "document.documentElement.outerHTML",
@@ -349,7 +326,10 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           }
 
           var avatarNode = div.querySelector('.avatar img');
-          String avatarUrl = _fixUrl(avatarNode?.attributes['src'] ?? "");
+          String avatarUrl = avatarNode?.attributes['src'] ?? "";
+          if (avatarUrl.isNotEmpty && !avatarUrl.startsWith("http")) {
+            avatarUrl = "$_baseUrl$avatarUrl";
+          }
 
           var timeNode = div.querySelector('em[id^="authorposton"]');
           String time = timeNode?.text.replaceAll("发表于 ", "").trim() ?? "";
@@ -357,6 +337,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           if (spanTime != null && spanTime.attributes.containsKey('title')) {
             time = spanTime.attributes['title']!;
           }
+
           var floorNode = div.querySelector('.pi strong a em');
           String floorText = floorNode?.text ?? "${floorIndex++}楼";
 
@@ -364,31 +345,54 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           String content = contentNode?.innerHtml ?? "";
 
           content = content.replaceAll(r'\n', '<br>');
-          content = content.replaceAll('lazyloaded="true"', '');
-          content = content.replaceAll('ignore_js_op', 'div');
+          content = content.replaceAll('<div class="mbn savephotop">', '<div>');
+          content = content.replaceAll(
+            'src="data/attachment',
+            'src="${_baseUrl}data/attachment',
+          );
+          content = content.replaceAll(
+            'file="data/attachment',
+            'file="${_baseUrl}data/attachment',
+          );
+          content = content.replaceAll(
+            'zoomfile="data/attachment',
+            'zoomfile="${_baseUrl}data/attachment',
+          );
+
+          content = content.replaceAllMapped(RegExp(r'<img[^>]+>'), (match) {
+            String imgTag = match.group(0)!;
+
+            RegExp zoomReg = RegExp(r'zoomfile="([^"]+)"');
+            RegExp fileReg = RegExp(r'file="([^"]+)"');
+            RegExp srcReg = RegExp(r'src="([^"]+)"');
+
+            String? zoomUrl = zoomReg.firstMatch(imgTag)?.group(1);
+            String? fileUrl = fileReg.firstMatch(imgTag)?.group(1);
+            String? srcUrl = srcReg.firstMatch(imgTag)?.group(1);
+
+            String bestUrl = "";
+
+            if (zoomUrl != null && zoomUrl.isNotEmpty)
+              bestUrl = zoomUrl;
+            else if (fileUrl != null && fileUrl.isNotEmpty)
+              bestUrl = fileUrl;
+            else if (srcUrl != null &&
+                !srcUrl.contains("loading.gif") &&
+                !srcUrl.contains("none.gif"))
+              bestUrl = srcUrl;
+
+            if (bestUrl.isNotEmpty) {
+              if (!bestUrl.startsWith('http')) bestUrl = _baseUrl + bestUrl;
+              return '<img src="$bestUrl" style="max-width:100%; height:auto; display:block; margin: 8px 0;">';
+            }
+            return "";
+          });
+
           content = content.replaceAll(
             RegExp(r'<script.*?>.*?</script>', dotAll: true),
             '',
           );
-          content = content.replaceAll(
-            RegExp(r'<div class="tip.*?>.*?</div>', dotAll: true),
-            '',
-          );
-          content = content.replaceAll(
-            RegExp(r'<i class="pstatus">.*?</i>', dotAll: true),
-            '',
-          );
-
-          // 预处理：把所有相对路径都先变成绝对路径
-          // 防止 customWidgetBuilder 解析到 relative path 导致图片不显示
-          content = content.replaceAll(
-            '="data/attachment',
-            '="${_baseUrl}data/attachment',
-          );
-          content = content.replaceAll(
-            '="forum.php?mod=image',
-            '="${_baseUrl}forum.php?mod=image',
-          );
+          content = content.replaceAll('ignore_js_op', 'div');
 
           newPosts.add(
             PostItem(
@@ -412,7 +416,9 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
 
       if (mounted) {
         setState(() {
-          if (_currentPage == 1) {
+          if (_currentPage == widget.initialPage &&
+              newPosts.isNotEmpty &&
+              _posts.isEmpty) {
             _posts = newPosts;
           } else {
             for (var p in newPosts) {
@@ -437,17 +443,147 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     }
   }
 
+  String _cleanHtml(String raw) {
+    String clean = raw;
+    if (clean.startsWith('"')) clean = clean.substring(1, clean.length - 1);
+    clean = clean
+        .replaceAll('\\u003C', '<')
+        .replaceAll('\\"', '"')
+        .replaceAll('\\\\', '\\');
+    return clean;
+  }
+
+  Future<void> _saveBookmark() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? jsonStr = prefs.getString('local_bookmarks');
+    List<dynamic> jsonList = [];
+    if (jsonStr != null && jsonStr.startsWith("[")) {
+      jsonList = jsonDecode(jsonStr);
+    }
+    final newMark = BookmarkItem(
+      tid: widget.tid,
+      subject: widget.subject,
+      author: _posts.isNotEmpty ? _posts.first.author : "未知",
+      page: _currentPage,
+      savedTime: DateTime.now().toString().substring(0, 16),
+    );
+    jsonList.removeWhere((e) => e['tid'] == widget.tid);
+    jsonList.insert(0, newMark.toJson());
+    await prefs.setString('local_bookmarks', jsonEncode(jsonList));
+
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("进度已保存到书签")));
+    }
+    _toggleFab();
+  }
+
+  // 设置面板
+  void _showDisplaySettings() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return Container(
+              padding: const EdgeInsets.all(20),
+              height: 250,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "字体大小",
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  Slider(
+                    value: _fontSize,
+                    min: 12.0,
+                    max: 30.0,
+                    divisions: 18,
+                    label: _fontSize.toStringAsFixed(0),
+                    onChanged: (val) {
+                      setSheetState(() => _fontSize = val);
+                      setState(() => _fontSize = val);
+                    },
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    "背景颜色",
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _buildColorBtn(
+                        const Color(0xFFFFFFFF),
+                        Colors.black87,
+                        "白昼",
+                      ),
+                      _buildColorBtn(
+                        const Color(0xFFFAF9DE),
+                        Colors.black87,
+                        "护眼",
+                      ),
+                      _buildColorBtn(
+                        const Color(0xFF1A1A1A),
+                        Colors.white70,
+                        "夜间",
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+    _toggleFab();
+  }
+
+  // 构建颜色按钮
+  Widget _buildColorBtn(Color bg, Color text, String label) {
+    bool isSelected = _readerBgColor == bg;
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _readerBgColor = bg;
+          _readerTextColor = text;
+        });
+        Navigator.pop(context);
+      },
+      child: Column(
+        children: [
+          Container(
+            width: 50,
+            height: 50,
+            decoration: BoxDecoration(
+              color: bg,
+              border: Border.all(
+                color: isSelected
+                    ? Theme.of(context).primaryColor
+                    : Colors.grey,
+                width: 2,
+              ),
+              shape: BoxShape.circle,
+            ),
+            child: isSelected ? Icon(Icons.check, color: text) : null,
+          ),
+          const SizedBox(height: 5),
+          Text(label, style: const TextStyle(fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
   Future<void> _launchURL(String? url) async {
     if (url == null || url.isEmpty) return;
     final Uri uri = Uri.parse(url.trim());
     try {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } catch (e) {
-      if (mounted)
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text("无法打开: $e")));
-    }
+    } catch (e) {}
   }
 
   @override
@@ -455,7 +591,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     Color bgColor = Theme.of(context).brightness == Brightness.dark
         ? Colors.black
         : const Color(0xFFF5F5F5);
-    if (_isReaderMode) bgColor = const Color(0xFFFAF9DE);
+    if (_isReaderMode) bgColor = _readerBgColor;
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -471,14 +607,18 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                   snap: false,
                   title: Text(
                     widget.subject,
-                    style: const TextStyle(fontSize: 16),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: _isReaderMode ? _readerTextColor : null,
+                    ),
                   ),
                   centerTitle: false,
                   elevation: 0,
-                  backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+                  backgroundColor: bgColor,
                   surfaceTintColor: Colors.transparent,
+                  iconTheme: IconThemeData(
+                    color: _isReaderMode ? _readerTextColor : null,
+                  ),
                 ),
               ];
             },
@@ -526,12 +666,26 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
               ),
               const SizedBox(height: 12),
               _buildFabItem(
+                icon: Icons.bookmark_add,
+                label: "保存进度",
+                onTap: _saveBookmark,
+              ),
+              const SizedBox(height: 12),
+              _buildFabItem(
                 icon: _isFavorited ? Icons.star : Icons.star_border,
                 label: _isFavorited ? "取消收藏" : "收藏本帖",
                 color: _isFavorited ? Colors.yellow : null,
                 onTap: _handleFavorite,
               ),
               const SizedBox(height: 12),
+              if (_isReaderMode) ...[
+                _buildFabItem(
+                  icon: Icons.settings,
+                  label: "阅读设置",
+                  onTap: _showDisplaySettings,
+                ),
+                const SizedBox(height: 12),
+              ],
               _buildFabItem(
                 icon: _isOnlyLandlord ? Icons.people : Icons.person,
                 label: _isOnlyLandlord ? "看全部" : "只看楼主",
@@ -601,6 +755,8 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   Widget _buildNativeList() {
     if (_isLoading && _posts.isEmpty)
       return const Center(child: CircularProgressIndicator());
+    if (_errorMsg.isNotEmpty) return Center(child: Text(_errorMsg)); // 显示错误信息
+
     return ListView.separated(
       padding: const EdgeInsets.only(bottom: 100),
       itemCount: _posts.length + 1,
@@ -662,18 +818,11 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                         children: [
                           InkWell(
                             onTap: () => _jumpToUser(post),
-                            borderRadius: BorderRadius.circular(4),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 2,
-                                vertical: 1,
-                              ),
-                              child: Text(
-                                post.author,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 14,
-                                ),
+                            child: Text(
+                              post.author,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
                               ),
                             ),
                           ),
@@ -717,23 +866,42 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
               child: HtmlWidget(
                 post.contentHtml,
                 textStyle: const TextStyle(fontSize: 16, height: 1.6),
-
                 customWidgetBuilder: (element) {
                   if (element.localName == 'img') {
                     String src = element.attributes['src'] ?? '';
-                    String zoomfile = element.attributes['zoomfile'] ?? '';
-                    String file = element.attributes['file'] ?? '';
-
-                    // 优先用高清图 zoomfile
-                    String urlToLoad = zoomfile.isNotEmpty
-                        ? zoomfile
-                        : (file.isNotEmpty ? file : src);
-
-                    // 【重要】用 _fixUrl 强制修复成 www. 开头
-                    urlToLoad = _fixUrl(urlToLoad);
-
-                    if (urlToLoad.isNotEmpty) {
-                      return _buildClickableImage(urlToLoad);
+                    if (src.isNotEmpty) {
+                      // 尝试带 UA 访问，提高成功率
+                      return Image.network(
+                        src,
+                        headers: const {'User-Agent': kUserAgent},
+                        loadingBuilder: (ctx, child, p) => p == null
+                            ? child
+                            : Container(
+                                height: 150,
+                                color: Colors.grey.shade100,
+                                child: const Center(
+                                  child: CircularProgressIndicator(),
+                                ),
+                              ),
+                        errorBuilder: (ctx, err, stack) => Container(
+                          height: 100,
+                          color: Colors.grey.shade200,
+                          alignment: Alignment.center,
+                          child: const Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.broken_image, color: Colors.grey),
+                              Text(
+                                "图片加载失败",
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.grey,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
                     }
                   }
                   return null;
@@ -745,9 +913,9 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                       'border-left': '3px solid #DDD',
                       'padding': '8px',
                     };
-                  if (element.localName == 'img') return {'display': 'none'};
                   return null;
                 },
+                onTapImage: (data) => print("查看: ${data.sources.first.url}"),
                 onTapUrl: (url) async {
                   await _launchURL(url);
                   return true;
@@ -760,43 +928,8 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     );
   }
 
-  Widget _buildClickableImage(String url) {
-    return GestureDetector(
-      onTap: () => print("点击图片: $url"),
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 8),
-        child: Image.network(
-          url,
-          // 【核心】必须带 Cookie 和 UA，否则服务器返回 403
-          headers: {
-            'User-Agent': kUserAgent,
-            'Cookie': _cookieString,
-            'Referer': '${_baseUrl}forum.php',
-          },
-          loadingBuilder: (context, child, progress) {
-            if (progress == null) return child;
-            return Container(
-              height: 200,
-              color: Colors.grey.shade100,
-              child: const Center(child: CircularProgressIndicator()),
-            );
-          },
-          errorBuilder: (context, error, stackTrace) {
-            return Container(
-              height: 100,
-              color: Colors.grey.shade200,
-              child: const Center(
-                child: Icon(Icons.broken_image, color: Colors.grey),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
   void _jumpToUser(PostItem post) {
-    if (post.authorId.isNotEmpty) {
+    if (post.authorId.isNotEmpty)
       Navigator.push(
         context,
         MaterialPageRoute(
@@ -807,13 +940,12 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           ),
         ),
       );
-    }
   }
 
   Widget _buildReaderMode() {
     if (_posts.isEmpty) return const Center(child: Text("暂无内容"));
     return Container(
-      color: const Color(0xFFFAF9DE),
+      color: _readerBgColor,
       child: ListView.builder(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
         itemCount: _posts.length + 1,
@@ -823,22 +955,33 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (index > 0) const Divider(height: 40, color: Colors.black12),
+              if (index > 0)
+                Divider(height: 40, color: _readerTextColor.withOpacity(0.1)),
               Text(
                 "${post.floor} ${post.author}",
-                style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                style: TextStyle(
+                  color: _readerTextColor.withOpacity(0.4),
+                  fontSize: 12,
+                ),
               ),
               const SizedBox(height: 10),
               HtmlWidget(
                 post.contentHtml,
-                textStyle: const TextStyle(
-                  fontSize: 18,
+                textStyle: TextStyle(
+                  fontSize: _fontSize,
                   height: 1.8,
-                  color: Colors.black87,
+                  color: _readerTextColor,
                   fontFamily: "Serif",
                 ),
-                customStylesBuilder: (element) {
-                  if (element.localName == 'img') return {'display': 'none'};
+                customWidgetBuilder: (element) {
+                  if (element.localName == 'img') {
+                    String src = element.attributes['src'] ?? '';
+                    if (src.isNotEmpty)
+                      return Image.network(
+                        src,
+                        headers: const {'User-Agent': kUserAgent},
+                      );
+                  }
                   return null;
                 },
                 onTapUrl: (url) async {

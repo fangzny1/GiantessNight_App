@@ -7,6 +7,7 @@ import 'forum_model.dart';
 import 'thread_list_page.dart';
 import 'search_page.dart'; // 引入搜索页
 import 'favorite_page.dart'; // 引入收藏页
+import 'bookmark_page.dart';
 
 final ValueNotifier<String> currentUser = ValueNotifier("未登录");
 final GlobalKey<_ForumHomePageState> forumKey = GlobalKey();
@@ -313,18 +314,36 @@ class ProfilePage extends StatelessWidget {
               // 【新增】我的收藏入口
               if (isLogin)
                 ListTile(
-                  leading: const Icon(Icons.star_outline, color: Colors.orange),
-                  title: const Text("我的收藏"),
+                  leading: const Icon(
+                    Icons.bookmark_border,
+                    color: Colors.purple,
+                  ),
+                  title: const Text("阅读书签"),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (context) => const FavoritePage(),
+                        builder: (context) => const BookmarkPage(),
                       ),
                     );
                   },
                 ),
+              const Divider(),
+
+              ListTile(
+                leading: const Icon(Icons.star_outline, color: Colors.orange),
+                title: const Text("我的收藏"),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const FavoritePage(),
+                    ),
+                  );
+                },
+              ),
               const Divider(),
 
               if (!isLogin)

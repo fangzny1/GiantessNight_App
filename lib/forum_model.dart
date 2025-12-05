@@ -89,3 +89,39 @@ class PostInfo {
     required this.contentHtml,
   });
 }
+// ... (保留 Category, Forum, Thread, PostInfo)
+
+class BookmarkItem {
+  final String tid;
+  final String subject;
+  final String author;
+  final int page; // 看到第几页了
+  final String savedTime; // 保存时间
+
+  BookmarkItem({
+    required this.tid,
+    required this.subject,
+    required this.author,
+    required this.page,
+    required this.savedTime,
+  });
+
+  // 转 JSON 存本地
+  Map<String, dynamic> toJson() => {
+    'tid': tid,
+    'subject': subject,
+    'author': author,
+    'page': page,
+    'savedTime': savedTime,
+  };
+
+  factory BookmarkItem.fromJson(Map<String, dynamic> json) {
+    return BookmarkItem(
+      tid: json['tid'],
+      subject: json['subject'],
+      author: json['author'],
+      page: json['page'] ?? 1,
+      savedTime: json['savedTime'],
+    );
+  }
+}
