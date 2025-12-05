@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -5,7 +7,8 @@ import 'package:html/parser.dart' as html_parser;
 import 'package:flutter_widget_from_html/flutter_widget_from_html.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
+
+// 引入其他页面 (确保这些文件存在)
 import 'login_page.dart';
 import 'user_detail_page.dart';
 import 'forum_model.dart';
@@ -52,12 +55,14 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     with SingleTickerProviderStateMixin {
   late final WebViewController _hiddenController;
   late final WebViewController _favCheckController;
+
   final ScrollController _scrollController = ScrollController();
 
   List<PostItem> _posts = [];
 
   bool _isLoading = true;
   bool _isLoadingMore = false;
+  bool _isLoadingPrev = false;
   bool _hasMore = true;
 
   bool _isOnlyLandlord = false;
@@ -74,16 +79,23 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   late AnimationController _fabAnimationController;
   late Animation<double> _fabAnimation;
 
-  String _errorMsg = "";
-  late int _currentPage;
-  String? _landlordUid;
+  late int _minPage;
+  late int _maxPage;
+  int _targetPage = 1;
 
+  String? _landlordUid;
   final String _baseUrl = "https://www.giantessnight.com/gnforum2012/";
+
+  // 存储 Cookie
+  String _userCookies = "";
 
   @override
   void initState() {
     super.initState();
-    _currentPage = widget.initialPage;
+    _minPage = widget.initialPage;
+    _maxPage = widget.initialPage;
+    _targetPage = widget.initialPage;
+
     _fabAnimationController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 260),
@@ -109,31 +121,8 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   void _onScroll() {
     if (_scrollController.position.pixels >=
         _scrollController.position.maxScrollExtent - 500) {
-      _loadMore();
+      _loadNext();
     }
-  }
-
-  void _toggleFab() {
-    setState(() {
-      _isFabOpen = !_isFabOpen;
-      if (_isFabOpen) {
-        _fabAnimationController.forward();
-      } else {
-        _fabAnimationController.reverse();
-      }
-    });
-  }
-
-  void _toggleReaderMode() {
-    setState(() {
-      _isReaderMode = !_isReaderMode;
-      if (_isReaderMode) {
-        SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      } else {
-        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-      }
-    });
-    _toggleFab();
   }
 
   void _initWebView() {
@@ -142,12 +131,35 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       ..setUserAgent(kUserAgent)
       ..setNavigationDelegate(
         NavigationDelegate(
-          onPageFinished: (url) {
+          onPageFinished: (url) async {
+            // 1. 同步 Cookie
+            try {
+              final String cookies =
+                  await _hiddenController.runJavaScriptReturningResult(
+                        'document.cookie',
+                      )
+                      as String;
+              String cleanCookies = cookies;
+              if (cleanCookies.startsWith('"') && cleanCookies.endsWith('"')) {
+                cleanCookies = cleanCookies.substring(
+                  1,
+                  cleanCookies.length - 1,
+                );
+              }
+              if (mounted) {
+                setState(() {
+                  _userCookies = cleanCookies;
+                });
+              }
+            } catch (e) {
+              print("Cookie 同步失败: $e");
+            }
+            // 2. 解析
             _parseHtmlData();
           },
         ),
       );
-    _loadPage(_currentPage);
+    _loadPage(_targetPage);
   }
 
   void _initFavCheck() {
@@ -173,86 +185,53 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     );
   }
 
-  Future<void> _parseFavList() async {
-    try {
-      final String rawHtml =
-          await _favCheckController.runJavaScriptReturningResult(
-                "document.documentElement.outerHTML",
-              )
-              as String;
-      String cleanHtml = _cleanHtml(rawHtml);
-      var document = html_parser.parse(cleanHtml);
-      var items = document.querySelectorAll('ul[id="favorite_ul"] li');
-      String? foundFavid;
-
-      for (var item in items) {
-        var link = item.querySelector('a[href*="tid=${widget.tid}"]');
-        if (link != null) {
-          var delLink = item.querySelector('a[href*="op=delete"]');
-          if (delLink != null) {
-            String href = delLink.attributes['href'] ?? "";
-            RegExp favidReg = RegExp(r'favid=(\d+)');
-            var match = favidReg.firstMatch(href);
-            if (match != null) {
-              foundFavid = match.group(1);
-              break;
-            }
-          }
-        }
-      }
-      if (mounted) {
-        if (foundFavid != null) {
-          setState(() {
-            _isFavorited = true;
-            _favid = foundFavid;
-          });
-        } else if (_isFavorited) {
-          setState(() {
-            _isFavorited = false;
-            _favid = null;
-          });
-        }
-      }
-    } catch (e) {
-      // 忽略错误
-    }
-  }
-
   void _loadPage(int page) {
-    if (!_hasMore && page > _currentPage) return;
+    _targetPage = page;
     String url =
         '${_baseUrl}forum.php?mod=viewthread&tid=${widget.tid}&extra=page%3D1&page=$page&mobile=no';
     if (_isOnlyLandlord && _landlordUid != null)
       url += '&authorid=$_landlordUid';
-    print("🚀 加载: $url");
+    print("🚀 加载帖子: 第 $page 页");
     _hiddenController.loadRequest(Uri.parse(url));
   }
 
-  void _toggleOnlyLandlord() {
-    if (_landlordUid == null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("未找到楼主")));
-      return;
-    }
-    setState(() {
-      _isOnlyLandlord = !_isOnlyLandlord;
-      _posts.clear();
-      _currentPage = 1;
-      _hasMore = true;
-      _isLoading = true;
-      _isFabOpen = false;
-      _fabAnimationController.reverse();
-    });
-    _loadPage(1);
-  }
-
-  void _loadMore() {
+  void _loadNext() {
     if (_isLoading || _isLoadingMore || !_hasMore) return;
     setState(() {
       _isLoadingMore = true;
     });
-    _loadPage(_currentPage + 1);
+    _loadPage(_maxPage + 1);
+  }
+
+  void _loadPrev() {
+    if (_isLoading || _isLoadingPrev || _minPage <= 1) return;
+    setState(() {
+      _isLoadingPrev = true;
+    });
+    _loadPage(_minPage - 1);
+  }
+
+  void _toggleFab() {
+    setState(() {
+      _isFabOpen = !_isFabOpen;
+      if (_isFabOpen) {
+        _fabAnimationController.forward();
+      } else {
+        _fabAnimationController.reverse();
+      }
+    });
+  }
+
+  void _toggleReaderMode() {
+    setState(() {
+      _isReaderMode = !_isReaderMode;
+      if (_isReaderMode) {
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      } else {
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      }
+    });
+    _toggleFab();
   }
 
   void _handleFavorite() {
@@ -291,6 +270,89 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     }
   }
 
+  Future<void> _saveBookmark() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? jsonStr = prefs.getString('local_bookmarks');
+    List<dynamic> jsonList = [];
+    if (jsonStr != null && jsonStr.startsWith("["))
+      jsonList = jsonDecode(jsonStr);
+
+    final newMark = BookmarkItem(
+      tid: widget.tid,
+      subject: widget.subject,
+      author: _posts.isNotEmpty ? _posts.first.author : "未知",
+      page: _maxPage,
+      savedTime: DateTime.now().toString().substring(0, 16),
+    );
+
+    jsonList.removeWhere((e) => e['tid'] == widget.tid);
+    jsonList.insert(0, newMark.toJson());
+    await prefs.setString('local_bookmarks', jsonEncode(jsonList));
+
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("进度已保存")));
+    }
+    _toggleFab();
+  }
+
+  void _toggleOnlyLandlord() {
+    if (_landlordUid == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("未找到楼主信息")));
+      return;
+    }
+    setState(() {
+      _isOnlyLandlord = !_isOnlyLandlord;
+      _posts.clear();
+      _minPage = 1;
+      _maxPage = 1;
+      _hasMore = true;
+      _isLoading = true;
+      _targetPage = 1;
+      _toggleFab();
+    });
+    _loadPage(1);
+  }
+
+  Future<void> _parseFavList() async {
+    try {
+      final String rawHtml =
+          await _favCheckController.runJavaScriptReturningResult(
+                "document.documentElement.outerHTML",
+              )
+              as String;
+      String cleanHtml = _cleanHtml(rawHtml);
+      var document = html_parser.parse(cleanHtml);
+      var items = document.querySelectorAll('ul[id="favorite_ul"] li');
+      String? foundFavid;
+      for (var item in items) {
+        var link = item.querySelector('a[href*="tid=${widget.tid}"]');
+        if (link != null) {
+          var delLink = item.querySelector('a[href*="op=delete"]');
+          if (delLink != null) {
+            String href = delLink.attributes['href'] ?? "";
+            String favid =
+                RegExp(r'favid=(\d+)').firstMatch(href)?.group(1) ?? "";
+            if (favid.isNotEmpty) {
+              foundFavid = favid;
+              break;
+            }
+          }
+        }
+      }
+      if (mounted) {
+        setState(() {
+          _isFavorited = (foundFavid != null);
+          _favid = foundFavid;
+        });
+      }
+    } catch (e) {}
+  }
+
+  // === 核心解析逻辑 ===
   Future<void> _parseHtmlData() async {
     try {
       final String rawHtml =
@@ -299,12 +361,40 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
               )
               as String;
       String cleanHtml = _cleanHtml(rawHtml);
-
       var document = html_parser.parse(cleanHtml);
+
+      // 【Step 1】 建立 AID -> 静态 URL 映射表
+      // Discuz 会在页面底部（ignore_js_op 或 pattl）列出所有附件，
+      // 并提供 img[aid] 和 zoomfile (静态链接)
+      Map<String, String> aidToStaticUrl = {};
+
+      // 查找所有带有 aid 属性且有 zoomfile 的 img 标签
+      var attachmentImgs = document.querySelectorAll('img[aid][zoomfile]');
+      for (var img in attachmentImgs) {
+        String? aid = img.attributes['aid'];
+        String? url = img.attributes['zoomfile'];
+        if (aid != null && url != null && url.contains("data/attachment")) {
+          aidToStaticUrl[aid] = url;
+        }
+      }
+      // 补充：有时候是 file 属性存静态链
+      for (var img in attachmentImgs) {
+        String? aid = img.attributes['aid'];
+        String? url = img.attributes['file'];
+        if (aid != null && url != null && url.contains("data/attachment")) {
+          // 如果 zoomfile 没存，用 file 补
+          if (!aidToStaticUrl.containsKey(aid)) {
+            aidToStaticUrl[aid] = url;
+          }
+        }
+      }
+
+      print("🔎 发现附件静态映射: ${aidToStaticUrl.length} 个");
+
       List<PostItem> newPosts = [];
       var postDivs = document.querySelectorAll('div[id^="post_"]');
 
-      int floorIndex = (_currentPage - 1) * 10 + 1;
+      int floorIndex = (_targetPage - 1) * 10 + 1;
 
       for (var div in postDivs) {
         try {
@@ -315,13 +405,10 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
               div.querySelector('.authi .xw1') ?? div.querySelector('.authi a');
           String author = authorNode?.text.trim() ?? "匿名";
           String authorHref = authorNode?.attributes['href'] ?? "";
-          RegExp uidReg = RegExp(r'uid=(\d+)');
-          String authorId = uidReg.firstMatch(authorHref)?.group(1) ?? "";
+          String authorId =
+              RegExp(r'uid=(\d+)').firstMatch(authorHref)?.group(1) ?? "";
 
-          if (_landlordUid == null &&
-              _currentPage == 1 &&
-              newPosts.isEmpty &&
-              _posts.isEmpty) {
+          if (_landlordUid == null && _posts.isEmpty) {
             _landlordUid = authorId;
           }
 
@@ -333,10 +420,6 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
 
           var timeNode = div.querySelector('em[id^="authorposton"]');
           String time = timeNode?.text.replaceAll("发表于 ", "").trim() ?? "";
-          var spanTime = timeNode?.querySelector('span');
-          if (spanTime != null && spanTime.attributes.containsKey('title')) {
-            time = spanTime.attributes['title']!;
-          }
 
           var floorNode = div.querySelector('.pi strong a em');
           String floorText = floorNode?.text ?? "${floorIndex++}楼";
@@ -344,49 +427,94 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           var contentNode = div.querySelector('td.t_f');
           String content = contentNode?.innerHtml ?? "";
 
+          // === Step 2: 内容清洗与链接替换 ===
           content = content.replaceAll(r'\n', '<br>');
           content = content.replaceAll('<div class="mbn savephotop">', '<div>');
-          content = content.replaceAll(
-            'src="data/attachment',
-            'src="${_baseUrl}data/attachment',
+
+          content = content.replaceAllMapped(
+            RegExp(r'<img[^>]+>', dotAll: true),
+            (match) {
+              String imgTag = match.group(0)!;
+
+              // 提取属性
+              String? zoomUrl = RegExp(
+                r'zoomfile="([^"]+)"',
+              ).firstMatch(imgTag)?.group(1);
+              String? fileUrl = RegExp(
+                r'file="([^"]+)"',
+              ).firstMatch(imgTag)?.group(1);
+              String? srcUrl = RegExp(
+                r'src="([^"]+)"',
+              ).firstMatch(imgTag)?.group(1);
+
+              // 尝试提取 AID (从 URL 中提取)
+              // 常见的动态链接: forum.php?mod=image&aid=129125&...
+              String? aidFromUrl;
+              RegExp aidReg = RegExp(r'aid=(\d+)');
+
+              if (fileUrl != null) {
+                aidFromUrl = aidReg.firstMatch(fileUrl)?.group(1);
+              }
+              if (aidFromUrl == null && srcUrl != null) {
+                aidFromUrl = aidReg.firstMatch(srcUrl)?.group(1);
+              }
+
+              String bestUrl = "";
+
+              // 【策略 1】 如果有 AID 且在静态映射表中存在，直接用静态链接 (100% 解决 WAF/缩略图问题)
+              if (aidFromUrl != null &&
+                  aidToStaticUrl.containsKey(aidFromUrl)) {
+                bestUrl = aidToStaticUrl[aidFromUrl]!;
+                // print("✅ 成功替换动态链接 aid=$aidFromUrl -> $bestUrl");
+              }
+              // 【策略 2】 否则按照优先级寻找静态属性
+              else if (zoomUrl != null && zoomUrl.contains("data/attachment")) {
+                bestUrl = zoomUrl;
+              } else if (fileUrl != null &&
+                  fileUrl.contains("data/attachment")) {
+                bestUrl = fileUrl;
+              } else if (srcUrl != null && srcUrl.contains("data/attachment")) {
+                bestUrl = srcUrl;
+              }
+              // 【策略 3】 实在没办法，只能用动态链接，但要清洗
+              else if (fileUrl != null && fileUrl.isNotEmpty) {
+                bestUrl = fileUrl;
+              } else if (srcUrl != null && srcUrl.isNotEmpty) {
+                if (!srcUrl.contains("loading.gif") &&
+                    !srcUrl.contains("none.gif") &&
+                    !srcUrl.contains("common.gif")) {
+                  bestUrl = srcUrl;
+                }
+              }
+
+              if (bestUrl.isNotEmpty) {
+                // 1. 修复 HTML 实体
+                bestUrl = bestUrl.replaceAll('&amp;', '&');
+
+                // 2. 清洗动态链接 (强力去毒)
+                if (bestUrl.contains("mod=image")) {
+                  bestUrl = bestUrl.replaceAll(RegExp(r'&mobile=[0-9]+'), '');
+                  bestUrl = bestUrl.replaceAll(RegExp(r'&mobile=yes'), '');
+                  bestUrl = bestUrl.replaceAll(RegExp(r'&mobile=no'), '');
+                  bestUrl = bestUrl.replaceAll('&type=fixnone', '');
+                }
+
+                // 3. 补全路径
+                if (!bestUrl.startsWith('http')) {
+                  String base = _baseUrl.endsWith('/')
+                      ? _baseUrl
+                      : "$_baseUrl/";
+                  String path = bestUrl.startsWith('/')
+                      ? bestUrl.substring(1)
+                      : bestUrl;
+                  bestUrl = base + path;
+                }
+
+                return '<img src="$bestUrl" style="max-width:100%; height:auto; display:block; margin: 8px 0;">';
+              }
+              return "";
+            },
           );
-          content = content.replaceAll(
-            'file="data/attachment',
-            'file="${_baseUrl}data/attachment',
-          );
-          content = content.replaceAll(
-            'zoomfile="data/attachment',
-            'zoomfile="${_baseUrl}data/attachment',
-          );
-
-          content = content.replaceAllMapped(RegExp(r'<img[^>]+>'), (match) {
-            String imgTag = match.group(0)!;
-
-            RegExp zoomReg = RegExp(r'zoomfile="([^"]+)"');
-            RegExp fileReg = RegExp(r'file="([^"]+)"');
-            RegExp srcReg = RegExp(r'src="([^"]+)"');
-
-            String? zoomUrl = zoomReg.firstMatch(imgTag)?.group(1);
-            String? fileUrl = fileReg.firstMatch(imgTag)?.group(1);
-            String? srcUrl = srcReg.firstMatch(imgTag)?.group(1);
-
-            String bestUrl = "";
-
-            if (zoomUrl != null && zoomUrl.isNotEmpty)
-              bestUrl = zoomUrl;
-            else if (fileUrl != null && fileUrl.isNotEmpty)
-              bestUrl = fileUrl;
-            else if (srcUrl != null &&
-                !srcUrl.contains("loading.gif") &&
-                !srcUrl.contains("none.gif"))
-              bestUrl = srcUrl;
-
-            if (bestUrl.isNotEmpty) {
-              if (!bestUrl.startsWith('http')) bestUrl = _baseUrl + bestUrl;
-              return '<img src="$bestUrl" style="max-width:100%; height:auto; display:block; margin: 8px 0;">';
-            }
-            return "";
-          });
 
           content = content.replaceAll(
             RegExp(r'<script.*?>.*?</script>', dotAll: true),
@@ -416,22 +544,24 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
 
       if (mounted) {
         setState(() {
-          if (_currentPage == widget.initialPage &&
-              newPosts.isNotEmpty &&
-              _posts.isEmpty) {
+          if (_targetPage == widget.initialPage && _posts.isEmpty) {
             _posts = newPosts;
+          } else if (_targetPage < _minPage) {
+            _posts.insertAll(0, newPosts);
+            _minPage = _targetPage;
           } else {
             for (var p in newPosts) {
               if (!_posts.any((old) => old.pid == p.pid)) _posts.add(p);
             }
+            if (newPosts.isNotEmpty) _maxPage = _targetPage;
           }
-          if (!hasNextPage)
-            _hasMore = false;
-          else if (newPosts.isNotEmpty)
-            _currentPage++;
-          if (newPosts.isEmpty) _hasMore = false;
+
+          if (!hasNextPage && _targetPage >= _maxPage) _hasMore = false;
+          if (newPosts.isEmpty && _targetPage > 1) _hasMore = false;
+
           _isLoading = false;
           _isLoadingMore = false;
+          _isLoadingPrev = false;
         });
       }
     } catch (e) {
@@ -439,8 +569,78 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
         setState(() {
           _isLoading = false;
           _isLoadingMore = false;
+          _isLoadingPrev = false;
         });
     }
+  }
+
+  // 使用原生 Image.network 加载
+  Widget _buildClickableImage(String url) {
+    if (url.isEmpty) return const SizedBox();
+
+    String fullUrl = url;
+    if (!fullUrl.startsWith('http')) {
+      String base = _baseUrl.endsWith('/') ? _baseUrl : "$_baseUrl/";
+      String path = fullUrl.startsWith('/') ? fullUrl.substring(1) : fullUrl;
+      fullUrl = base + path;
+    }
+
+    return GestureDetector(
+      onTap: () => _launchURL(fullUrl),
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 8),
+        child: Image.network(
+          fullUrl,
+          headers: {
+            'Cookie': _userCookies,
+            'User-Agent': kUserAgent,
+            'Referer': _baseUrl,
+            'Accept':
+                'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+          },
+          fit: BoxFit.contain,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return Container(
+              height: 200,
+              width: double.infinity,
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              alignment: Alignment.center,
+              child: SizedBox(
+                width: 30,
+                height: 30,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  value: loadingProgress.expectedTotalBytes != null
+                      ? loadingProgress.cumulativeBytesLoaded /
+                            loadingProgress.expectedTotalBytes!
+                      : null,
+                ),
+              ),
+            );
+          },
+          errorBuilder: (context, error, stackTrace) {
+            return Container(
+              height: 100,
+              width: double.infinity,
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              alignment: Alignment.center,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.broken_image, color: Colors.grey),
+                  const SizedBox(height: 4),
+                  const Text(
+                    "图片加载失败(点击浏览器打开)",
+                    style: TextStyle(fontSize: 10, color: Colors.grey),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
   }
 
   String _cleanHtml(String raw) {
@@ -453,33 +653,14 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     return clean;
   }
 
-  Future<void> _saveBookmark() async {
-    final prefs = await SharedPreferences.getInstance();
-    String? jsonStr = prefs.getString('local_bookmarks');
-    List<dynamic> jsonList = [];
-    if (jsonStr != null && jsonStr.startsWith("[")) {
-      jsonList = jsonDecode(jsonStr);
-    }
-    final newMark = BookmarkItem(
-      tid: widget.tid,
-      subject: widget.subject,
-      author: _posts.isNotEmpty ? _posts.first.author : "未知",
-      page: _currentPage,
-      savedTime: DateTime.now().toString().substring(0, 16),
-    );
-    jsonList.removeWhere((e) => e['tid'] == widget.tid);
-    jsonList.insert(0, newMark.toJson());
-    await prefs.setString('local_bookmarks', jsonEncode(jsonList));
-
-    if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("进度已保存到书签")));
-    }
-    _toggleFab();
+  Future<void> _launchURL(String? url) async {
+    if (url == null || url.isEmpty) return;
+    final Uri uri = Uri.parse(url.trim());
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (e) {}
   }
 
-  // 设置面板
   void _showDisplaySettings() {
     showModalBottomSheet(
       context: context,
@@ -543,7 +724,6 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     _toggleFab();
   }
 
-  // 构建颜色按钮
   Widget _buildColorBtn(Color bg, Color text, String label) {
     bool isSelected = _readerBgColor == bg;
     return GestureDetector(
@@ -578,19 +758,23 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     );
   }
 
-  Future<void> _launchURL(String? url) async {
-    if (url == null || url.isEmpty) return;
-    final Uri uri = Uri.parse(url.trim());
-    try {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } catch (e) {}
+  void _jumpToUser(PostItem post) {
+    if (post.authorId.isNotEmpty)
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => UserDetailPage(
+            uid: post.authorId,
+            username: post.author,
+            avatarUrl: post.avatarUrl,
+          ),
+        ),
+      );
   }
 
   @override
   Widget build(BuildContext context) {
-    Color bgColor = Theme.of(context).brightness == Brightness.dark
-        ? Colors.black
-        : const Color(0xFFF5F5F5);
+    Color bgColor = Theme.of(context).colorScheme.surface;
     if (_isReaderMode) bgColor = _readerBgColor;
 
     return Scaffold(
@@ -658,9 +842,11 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                   setState(() {
                     _isLoading = true;
                     _posts.clear();
-                    _currentPage = 1;
+                    _targetPage = 1;
+                    _minPage = 1;
+                    _maxPage = 1;
                   });
-                  _hiddenController.reload();
+                  _loadPage(1);
                   _toggleFab();
                 },
               ),
@@ -755,15 +941,33 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   Widget _buildNativeList() {
     if (_isLoading && _posts.isEmpty)
       return const Center(child: CircularProgressIndicator());
-    if (_errorMsg.isNotEmpty) return Center(child: Text(_errorMsg)); // 显示错误信息
+
+    bool showPrevBtn = _minPage > 1;
+    int count = _posts.length + 1 + (showPrevBtn ? 1 : 0);
 
     return ListView.separated(
       padding: const EdgeInsets.only(bottom: 100),
-      itemCount: _posts.length + 1,
+      itemCount: count,
       separatorBuilder: (ctx, i) => const SizedBox(height: 8),
       itemBuilder: (context, index) {
-        if (index == _posts.length) return _buildFooter();
-        return _buildPostCard(_posts[index]);
+        if (showPrevBtn && index == 0) {
+          return Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: Center(
+              child: _isLoadingPrev
+                  ? const CircularProgressIndicator()
+                  : TextButton.icon(
+                      icon: const Icon(Icons.arrow_upward),
+                      label: Text("加载上一页 (第 $_minPage 页之前)"),
+                      onPressed: _loadPrev,
+                    ),
+            ),
+          );
+        }
+        if (index == count - 1) return _buildFooter();
+
+        int postIndex = showPrevBtn ? index - 1 : index;
+        return _buildPostCard(_posts[postIndex]);
       },
     );
   }
@@ -869,40 +1073,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                 customWidgetBuilder: (element) {
                   if (element.localName == 'img') {
                     String src = element.attributes['src'] ?? '';
-                    if (src.isNotEmpty) {
-                      // 尝试带 UA 访问，提高成功率
-                      return Image.network(
-                        src,
-                        headers: const {'User-Agent': kUserAgent},
-                        loadingBuilder: (ctx, child, p) => p == null
-                            ? child
-                            : Container(
-                                height: 150,
-                                color: Colors.grey.shade100,
-                                child: const Center(
-                                  child: CircularProgressIndicator(),
-                                ),
-                              ),
-                        errorBuilder: (ctx, err, stack) => Container(
-                          height: 100,
-                          color: Colors.grey.shade200,
-                          alignment: Alignment.center,
-                          child: const Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.broken_image, color: Colors.grey),
-                              Text(
-                                "图片加载失败",
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: Colors.grey,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    }
+                    if (src.isNotEmpty) return _buildClickableImage(src);
                   }
                   return null;
                 },
@@ -915,7 +1086,6 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                     };
                   return null;
                 },
-                onTapImage: (data) => print("查看: ${data.sources.first.url}"),
                 onTapUrl: (url) async {
                   await _launchURL(url);
                   return true;
@@ -928,34 +1098,35 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     );
   }
 
-  void _jumpToUser(PostItem post) {
-    if (post.authorId.isNotEmpty)
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => UserDetailPage(
-            uid: post.authorId,
-            username: post.author,
-            avatarUrl: post.avatarUrl,
-          ),
-        ),
-      );
-  }
-
   Widget _buildReaderMode() {
     if (_posts.isEmpty) return const Center(child: Text("暂无内容"));
+
+    bool showPrevBtn = _minPage > 1;
+    int count = _posts.length + 1 + (showPrevBtn ? 1 : 0);
+
     return Container(
       color: _readerBgColor,
       child: ListView.builder(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
-        itemCount: _posts.length + 1,
+        itemCount: count,
         itemBuilder: (context, index) {
-          if (index == _posts.length) return _buildFooter();
-          final post = _posts[index];
+          if (showPrevBtn && index == 0) {
+            return Center(
+              child: TextButton(
+                onPressed: _loadPrev,
+                child: const Text("加载上一页"),
+              ),
+            );
+          }
+          if (index == count - 1) return _buildFooter();
+
+          int postIndex = showPrevBtn ? index - 1 : index;
+          final post = _posts[postIndex];
+
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (index > 0)
+              if (postIndex > 0)
                 Divider(height: 40, color: _readerTextColor.withOpacity(0.1)),
               Text(
                 "${post.floor} ${post.author}",
@@ -976,11 +1147,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                 customWidgetBuilder: (element) {
                   if (element.localName == 'img') {
                     String src = element.attributes['src'] ?? '';
-                    if (src.isNotEmpty)
-                      return Image.network(
-                        src,
-                        headers: const {'User-Agent': kUserAgent},
-                      );
+                    if (src.isNotEmpty) return _buildClickableImage(src);
                   }
                   return null;
                 },

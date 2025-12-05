@@ -185,8 +185,10 @@ class _UserDetailPageState extends State<UserDetailPage> {
           if (_targetPage == 1) {
             _threads = newThreads;
             _currentPage = 1;
+            // 【修复】如果是第一页且数据很少(小于20条)，直接认为没有下一页了，防止转圈
+            if (newThreads.length < 20) _hasMore = false;
           } else {
-            // 翻页追加逻辑 (去重)
+            // 翻页追加逻辑
             bool hasNew = false;
             for (var t in newThreads) {
               if (!_threads.any((old) => old.tid == t.tid)) {
@@ -197,8 +199,8 @@ class _UserDetailPageState extends State<UserDetailPage> {
             if (hasNew) _currentPage = _targetPage;
           }
 
-          // Discuz 用户页每页通常也是 20 条，如果少于 5 条，说明没数据了
-          if (newThreads.length < 5) {
+          // 【修复】如果获取到的数据为空，或者少于 Discuz 默认分页数(通常20)，说明到底了
+          if (newThreads.isEmpty || newThreads.length < 20) {
             _hasMore = false;
           }
 
@@ -212,7 +214,9 @@ class _UserDetailPageState extends State<UserDetailPage> {
         setState(() {
           _isLoadingMore = false;
           _isFirstLoading = false;
-          if (_currentPage == 1) _errorMsg = "解析失败";
+          // 【修复】如果出错且是第一页，认为到底了，防止加载条卡住
+          if (_currentPage == 1) _hasMore = false;
+          if (_currentPage == 1) _errorMsg = "解析失败或网络错误";
         });
       }
     }
@@ -293,7 +297,7 @@ class _UserDetailPageState extends State<UserDetailPage> {
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       elevation: 0,
-      color: Colors.white,
+      color: Theme.of(context).cardColor,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),

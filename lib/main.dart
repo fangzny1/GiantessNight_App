@@ -5,17 +5,28 @@ import 'dart:convert';
 import 'login_page.dart';
 import 'forum_model.dart';
 import 'thread_list_page.dart';
-import 'search_page.dart'; // 引入搜索页
-import 'favorite_page.dart'; // 引入收藏页
+import 'search_page.dart';
+import 'favorite_page.dart';
 import 'bookmark_page.dart';
 
+// 全局状态
 final ValueNotifier<String> currentUser = ValueNotifier("未登录");
+// 全局主题状态
+final ValueNotifier<ThemeMode> currentTheme = ValueNotifier(ThemeMode.system);
 final GlobalKey<_ForumHomePageState> forumKey = GlobalKey();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
+
   currentUser.value = prefs.getString('username') ?? "未登录";
+
+  String? themeStr = prefs.getString('theme_mode');
+  if (themeStr == 'dark')
+    currentTheme.value = ThemeMode.dark;
+  else if (themeStr == 'light')
+    currentTheme.value = ThemeMode.light;
+
   runApp(const MyApp());
 }
 
@@ -24,16 +35,30 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'GiantessNight',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF6750A4),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-      ),
-      home: const MainScreen(),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: currentTheme,
+      builder: (context, mode, child) {
+        return MaterialApp(
+          title: 'GiantessNight',
+          debugShowCheckedModeBanner: false,
+          themeMode: mode,
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF6750A4),
+              brightness: Brightness.light,
+            ),
+            useMaterial3: true,
+          ),
+          darkTheme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF6750A4),
+              brightness: Brightness.dark,
+            ),
+            useMaterial3: true,
+          ),
+          home: const MainScreen(),
+        );
+      },
     );
   }
 }
@@ -48,7 +73,7 @@ class _MainScreenState extends State<MainScreen> {
   int _selectedIndex = 0;
   final List<Widget> _pages = [
     ForumHomePage(key: forumKey),
-    const SearchPage(), // 【修改】换成真的搜索页
+    const SearchPage(),
     const ProfilePage(),
   ];
 
@@ -78,8 +103,7 @@ class _MainScreenState extends State<MainScreen> {
   }
 }
 
-// ... (ForumHomePage 代码保持不变，请不要删除，这里为了节省篇幅省略，你需要保留原有的 ForumHomePage 代码)
-// 为了防止你复制错，这里我还是完整贴一下 ForumHomePage 吧
+// ================== 首页 ==================
 
 class ForumHomePage extends StatefulWidget {
   const ForumHomePage({super.key});
@@ -99,7 +123,10 @@ class _ForumHomePageState extends State<ForumHomePage> {
     _initHiddenWebView();
   }
 
+  // 【修复点】这就是之前报错缺失的方法，现在补上了
   void refreshData() {
+    if (!mounted) return;
+    print("🔄 收到外部刷新请求...");
     _fetchData();
   }
 
@@ -110,8 +137,9 @@ class _ForumHomePageState extends State<ForumHomePage> {
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (url) {
-            if (url.contains("forumindex") || url.contains("forum.php"))
+            if (url.contains("forumindex") || url.contains("forum.php")) {
               _parsePageContent();
+            }
           },
         ),
       );
@@ -138,11 +166,13 @@ class _ForumHomePageState extends State<ForumHomePage> {
               )
               as String;
       String jsonString = content;
-      if (jsonString.startsWith('"'))
+      if (jsonString.startsWith('"') && jsonString.endsWith('"')) {
         jsonString = jsonString.substring(1, jsonString.length - 1);
-      jsonString = jsonString.replaceAll('\\"', '"').replaceAll('\\\\', '\\');
+        jsonString = jsonString.replaceAll('\\"', '"').replaceAll('\\\\', '\\');
+      }
 
       var data = jsonDecode(jsonString);
+
       if (data['Variables'] == null) {
         if (currentUser.value != "未登录") {
           currentUser.value = "未登录";
@@ -203,7 +233,14 @@ class _ForumHomePageState extends State<ForumHomePage> {
               if (_isLoading)
                 const SliverToBoxAdapter(child: LinearProgressIndicator()),
               if (_categories.isEmpty && !_isLoading)
-                const SliverFillRemaining(child: Center(child: Text("暂无数据"))),
+                SliverFillRemaining(
+                  child: Center(
+                    child: ElevatedButton(
+                      onPressed: _fetchData,
+                      child: const Text("刷新数据"),
+                    ),
+                  ),
+                ),
               SliverList(
                 delegate: SliverChildBuilderDelegate((context, index) {
                   final category = _categories[index];
@@ -251,21 +288,7 @@ class _ForumHomePageState extends State<ForumHomePage> {
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       elevation: 0,
       color: Theme.of(context).colorScheme.surfaceContainerLow,
-      child: ListTile(
-        title: Text(
-          forum.name,
-          style: const TextStyle(fontWeight: FontWeight.bold),
-        ),
-        subtitle: Text(
-          forum.description,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
-        trailing:
-            int.tryParse(forum.todayposts) != null &&
-                int.parse(forum.todayposts) > 0
-            ? Badge(label: Text("+${forum.todayposts}"))
-            : const Icon(Icons.chevron_right),
+      child: InkWell(
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(
@@ -273,19 +296,99 @@ class _ForumHomePageState extends State<ForumHomePage> {
                 ThreadListPage(fid: forum.fid, forumName: forum.name),
           ),
         ),
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      forum.name,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  if (int.tryParse(forum.todayposts) != null &&
+                      int.parse(forum.todayposts) > 0)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.errorContainer,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        "+${forum.todayposts}",
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onErrorContainer,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              if (forum.description.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  forum.description,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(color: Colors.grey[600]),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }
 }
 
-// ================== ProfilePage ==================
-
 class ProfilePage extends StatelessWidget {
   const ProfilePage({super.key});
+
+  void _toggleTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (currentTheme.value == ThemeMode.light) {
+      currentTheme.value = ThemeMode.dark;
+      await prefs.setString('theme_mode', 'dark');
+    } else {
+      currentTheme.value = ThemeMode.light;
+      await prefs.setString('theme_mode', 'light');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("个人中心")),
+      appBar: AppBar(
+        title: const Text("个人中心"),
+        actions: [
+          ValueListenableBuilder<ThemeMode>(
+            valueListenable: currentTheme,
+            builder: (context, mode, _) {
+              bool isDark = mode == ThemeMode.dark;
+              if (mode == ThemeMode.system)
+                isDark =
+                    MediaQuery.of(context).platformBrightness ==
+                    Brightness.dark;
+              return IconButton(
+                icon: Icon(isDark ? Icons.dark_mode : Icons.light_mode),
+                onPressed: _toggleTheme,
+              );
+            },
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
       body: ValueListenableBuilder<String>(
         valueListenable: currentUser,
         builder: (context, username, child) {
@@ -309,47 +412,53 @@ class ProfilePage extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(height: 40),
-
-              // 【新增】我的收藏入口
+              const SizedBox(height: 8),
               if (isLogin)
-                ListTile(
-                  leading: const Icon(
-                    Icons.bookmark_border,
-                    color: Colors.purple,
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.green),
+                    ),
+                    child: const Text(
+                      "已登录",
+                      style: TextStyle(color: Colors.green, fontSize: 12),
+                    ),
                   ),
-                  title: const Text("阅读书签"),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const BookmarkPage(),
-                      ),
-                    );
-                  },
                 ),
-              const Divider(),
-
+              const SizedBox(height: 30),
+              ListTile(
+                leading: const Icon(
+                  Icons.bookmark_border,
+                  color: Colors.purple,
+                ),
+                title: const Text("阅读书签"),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const BookmarkPage()),
+                ),
+              ),
               ListTile(
                 leading: const Icon(Icons.star_outline, color: Colors.orange),
                 title: const Text("我的收藏"),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => const FavoritePage(),
-                    ),
-                  );
-                },
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const FavoritePage()),
+                ),
               ),
               const Divider(),
-
               if (!isLogin)
                 ListTile(
                   leading: const Icon(Icons.login),
                   title: const Text("登录账号"),
+                  trailing: const Icon(Icons.chevron_right),
                   onTap: () async {
                     final result = await Navigator.push(
                       context,
@@ -376,9 +485,6 @@ class ProfilePage extends StatelessWidget {
                     await WebViewCookieManager().clearCookies();
                     (await SharedPreferences.getInstance()).remove('username');
                     currentUser.value = "未登录";
-                    ScaffoldMessenger.of(
-                      context,
-                    ).showSnackBar(const SnackBar(content: Text("已退出")));
                   },
                 ),
             ],
@@ -387,4 +493,11 @@ class ProfilePage extends StatelessWidget {
       ),
     );
   }
+}
+
+class PlaceholderPage extends StatelessWidget {
+  final String title;
+  const PlaceholderPage({super.key, required this.title});
+  @override
+  Widget build(BuildContext context) => Center(child: Text(title));
 }
