@@ -1,10 +1,5 @@
 # 📱 GiantessNight 第三方客户端 (GN Forum App)
 
-<!-- 修复后的徽章，使用了更稳定的 shields.io 链接，如果还加载不出是网络问题，上传到 GitHub 后通常能显示 -->
-[![Flutter](https://img.shields.org/badge/Flutter-3.0%2B-02569B?logo=flutter&logoColor=white)](https://flutter.dev)
-[![Platform](https://img.shields.org/badge/Platform-Android-3DDC84?logo=android&logoColor=white)](https://www.android.com)
-[![License](https://img.shields.org/badge/License-MIT-purple.svg)](LICENSE)
-
 > **专为“被窝党”打造：流畅、纯净、强大的 GN 论坛原生阅读器。**
 
 这是一个基于 **Flutter** 开发的 [GiantessNight](https://www.giantessnight.com) 论坛第三方客户端。它解决了原生网页版在手机上翻页困难、图片加载失败、排版混乱等痛点，为你带来如丝般顺滑的阅读体验。
