@@ -1,29 +1,11 @@
-import 'dart:io';
-import 'dart:math'; // 引入这个用于生成随机数
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+// 这里的 cookie_jar 引用保留，虽然在这个页面主要靠 WebView 自身存 Cookie
 import 'package:dio/dio.dart';
-import 'package:cookie_jar/cookie_jar.dart';
-import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 
-// ==========================================
-// 全局配置区域
-// ==========================================
-
-// 【修改 1】更新 User-Agent，伪装成最新的安卓 Chrome，防止被防火墙嫌弃
+// 伪装成较新的 Android Chrome，通用性最强
 const String kUserAgent =
-    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36";
-
-final CookieJar cookieJar = CookieJar();
-final Dio dio = Dio(
-  BaseOptions(
-    headers: {'User-Agent': kUserAgent},
-    connectTimeout: const Duration(seconds: 15), // 稍微延长超时
-    receiveTimeout: const Duration(seconds: 15),
-  ),
-);
-
-bool _isInterceptorAdded = false;
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36";
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -34,105 +16,76 @@ class LoginPage extends StatefulWidget {
 
 class _LoginPageState extends State<LoginPage> {
   late final WebViewController controller;
-  bool isDetecting = false;
+  bool isDetecting = false; // 防止重复回调
 
   @override
   void initState() {
     super.initState();
 
-    if (!_isInterceptorAdded) {
-      dio.interceptors.add(CookieManager(cookieJar));
-      _isInterceptorAdded = true;
-    }
-
     controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(kUserAgent)
+      ..setUserAgent(kUserAgent) // 关键：伪装 UserAgent
       ..setNavigationDelegate(
         NavigationDelegate(
-          onPageFinished: (String url) async {
-            if (!isDetecting) {
-              checkLoginStatus(url);
-            }
+          onPageFinished: (String url) {
+            // 页面加载完，检查一下是不是登上了
+            _checkLoginStatus();
           },
-          // 【新增】拦截重定向错误，防止死循环
-          onWebResourceError: (error) {
-            print("WebView Error: ${error.description}");
+          onUrlChange: (UrlChange change) {
+            // URL 变化时（比如跳转了）也检查一下
+            _checkLoginStatus();
           },
         ),
       );
 
-    // 启动清理并加载
-    _clearAndLoad();
+    // 【修改】直接加载最原始、最稳定的手机版登录页
+    // mobile=2 是 Discuz 标准触屏版，界面简单，不容易被墙拦截
+    controller.loadRequest(
+      Uri.parse(
+        'https://www.giantessnight.com/gnforum2012/member.php?mod=logging&action=login&mobile=2',
+      ),
+    );
   }
 
-  Future<void> _clearAndLoad() async {
-    print("🧹 登录页：开始清理环境...");
+  Future<void> _checkLoginStatus() async {
+    if (isDetecting) return;
 
-    // 1. 清除 WebView 缓存
-    await controller.clearCache();
-    await controller.clearLocalStorage(); // 新增：清理本地存储
-
-    // 2. 彻底清除 Cookie
-    // 注意：有时候 clearCookies 返回得太快但系统还没删完
-    final cookieManager = WebViewCookieManager();
-    await cookieManager.clearCookies();
-
-    // 【修改 2】加一个小延时，确保 Cookie 真的被系统删干净了
-    // 避免 Discuz 识别到残留 Cookie 导致重定向死循环
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    print("🧹 登录页：环境清理完毕，准备加载");
-
-    // 【修改 3】URL 加随机参数 (t=时间戳)
-    // 作用：强制服务器认为这是一个全新的请求，绕过 WAF 的缓存或拦截规则
-    final String cleanUrl =
-        'https://www.giantessnight.com/gnforum2012/member.php?mod=logging&action=login&mobile=2&t=${DateTime.now().millisecondsSinceEpoch}';
-
-    // 这里特意用了 mobile=2，因为 Discuz 的原生手机登录页通常干扰更少，更不容易触发电脑版的复杂跳转
-    // 登录成功后获取到的 Cookie 是通用的，不影响 APP 后续伪装成电脑版使用
-
-    controller.loadRequest(Uri.parse(cleanUrl));
-  }
-
-  Future<void> checkLoginStatus(String url) async {
     try {
-      final Object result = await controller.runJavaScriptReturningResult(
-        'document.cookie',
-      );
-      String rawCookie = result.toString();
+      // 获取当前 Cookie
+      final String cookies =
+          await controller.runJavaScriptReturningResult('document.cookie')
+              as String;
 
+      // 清洗 Cookie 字符串
+      String rawCookie = cookies;
       if (rawCookie.startsWith('"') && rawCookie.endsWith('"')) {
         rawCookie = rawCookie.substring(1, rawCookie.length - 1);
       }
 
-      if (rawCookie.isEmpty) return;
-
-      // 只要包含 auth 或 saltkey 字段，说明用户手动登录成功了
-      if ((rawCookie.contains('auth') || rawCookie.contains('saltkey')) &&
-          !isDetecting) {
+      // Discuz 登录成功的标志：含有 auth 或 saltkey
+      if (rawCookie.contains('auth') ||
+          (rawCookie.contains('saltkey') && rawCookie.contains('uchome'))) {
         isDetecting = true;
-
-        print("✅ 登录成功！捕获 Cookie");
+        print("✅ 检测到登录 Cookie: $rawCookie");
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('验证成功，正在同步数据...'),
+              content: Text('登录成功，正在同步...'),
               duration: Duration(seconds: 1),
             ),
           );
 
-          // 稍微等一下，让 Cookie 写入更稳
-          await Future.delayed(const Duration(milliseconds: 800));
+          // 给一点时间让 Cookie 写入系统存储
+          await Future.delayed(const Duration(milliseconds: 500));
 
           if (mounted) {
-            Navigator.pop(context, true);
+            Navigator.pop(context, true); // 返回 true 通知主页刷新
           }
         }
       }
     } catch (e) {
-      print("Cookie 获取错误: $e");
+      print("Cookie 检查失败: $e");
     }
   }
 
@@ -142,8 +95,11 @@ class _LoginPageState extends State<LoginPage> {
       appBar: AppBar(
         title: const Text("登录账号"),
         actions: [
-          // 【新增】手动刷新按钮，万一卡住可以点一下
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _clearAndLoad),
+          // 保留一个刷新按钮，万一卡白屏可以点
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () => controller.reload(),
+          ),
         ],
       ),
       body: WebViewWidget(controller: controller),

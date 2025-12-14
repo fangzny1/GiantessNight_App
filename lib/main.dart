@@ -154,16 +154,40 @@ class _ForumHomePageState extends State<ForumHomePage> {
   void _initHiddenWebView() {
     _hiddenController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(kUserAgent)
+      ..setUserAgent(kUserAgent) // 必须和登录页一致
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (url) {
-            if (url.contains("forumindex") || url.contains("forum.php")) {
+            print("🌐 页面加载完毕: $url");
+
+            // 1. 如果加载的是 API 接口，尝试解析数据
+            if (url.contains('module=forumindex')) {
               _parsePageContent();
+            }
+            // 2. 【新增】如果加载的是普通网页（预热完成），立刻发起 API 请求
+            else if (url.contains('forum.php')) {
+              print("🔥 Session 预热成功，开始请求数据 API...");
+              _hiddenController.loadRequest(
+                Uri.parse(
+                  'https://www.giantessnight.com/gnforum2012/api/mobile/index.php?version=4&module=forumindex',
+                ),
+              );
+            }
+          },
+          // 增加错误处理
+          onWebResourceError: (error) {
+            print("❌ WebView 错误: ${error.description}");
+            if (mounted) {
+              setState(() {
+                _isLoading = false;
+                // 这里可以给 _categories 加一个假的错误数据提示用户刷新
+              });
             }
           },
         ),
       );
+
+    // 初始化时直接开始
     _fetchData();
   }
 
@@ -172,9 +196,14 @@ class _ForumHomePageState extends State<ForumHomePage> {
     setState(() {
       _isLoading = true;
     });
+
+    // 【核心修改】不直接请求 API，而是先请求一个普通的论坛页面
+    // 这样做是为了通过 WAF (防火墙) 的检查，激活 Session
+    // 等这个页面加载完 (onPageFinished)，我们再去请求 JSON API
+    print("🔄 开始预热 Session...");
     _hiddenController.loadRequest(
       Uri.parse(
-        'https://www.giantessnight.com/gnforum2012/api/mobile/index.php?version=4&module=forumindex',
+        'https://www.giantessnight.com/gnforum2012/forum.php?mobile=no',
       ),
     );
   }
