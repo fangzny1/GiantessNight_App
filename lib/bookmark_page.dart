@@ -3,6 +3,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import 'forum_model.dart';
 import 'thread_detail_page.dart';
+import 'dart:io';
+import 'main.dart'; // For customWallpaperPath and currentTheme
 
 class BookmarkPage extends StatefulWidget {
   const BookmarkPage({super.key});
@@ -70,105 +72,173 @@ class _BookmarkPageState extends State<BookmarkPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text("阅读书签")),
-      body: _bookmarks.isEmpty
-          ? const Center(
-              child: Text("暂无书签", style: TextStyle(color: Colors.grey)),
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.only(top: 10),
-              itemCount: _bookmarks.length,
-              itemBuilder: (context, index) {
-                final item = _bookmarks[index];
-                return Card(
-                  margin: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 6,
+    return ValueListenableBuilder<String?>(
+      valueListenable: customWallpaperPath,
+      builder: (context, wallpaperPath, _) {
+        bool useTransparent =
+            wallpaperPath != null && transparentBarsEnabled.value;
+        return Scaffold(
+          backgroundColor: useTransparent ? Colors.transparent : null,
+          extendBodyBehindAppBar: useTransparent,
+          appBar: AppBar(
+            title: const Text("阅读书签"),
+            backgroundColor: useTransparent ? Colors.transparent : null,
+            elevation: useTransparent ? 0 : null,
+          ),
+          body: Stack(
+            children: [
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: Image.file(
+                    File(wallpaperPath),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox(),
                   ),
-                  elevation: 0,
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    // 【点击】跳转
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => ThreadDetailPage(
-                            tid: item.tid,
-                            subject: item.subject,
-                            initialPage: item.page,
-                            initialNovelMode: item.isNovelMode,
-                            initialAuthorId: item.authorId,
-                          ),
-                        ),
+                ),
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: ValueListenableBuilder<ThemeMode>(
+                    valueListenable: currentTheme,
+                    builder: (context, mode, _) {
+                      bool isDark = mode == ThemeMode.dark;
+                      if (mode == ThemeMode.system) {
+                        isDark =
+                            MediaQuery.of(context).platformBrightness ==
+                            Brightness.dark;
+                      }
+                      return Container(
+                        color: isDark
+                            ? Colors.black.withOpacity(0.6)
+                            : Colors.white.withOpacity(0.3),
                       );
                     },
-                    // 【长按】删除
-                    onLongPress: () => _confirmDelete(index),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(
-                                item.isNovelMode
-                                    ? Icons.auto_stories
-                                    : Icons.article,
-                                color: item.isNovelMode
-                                    ? Colors.purpleAccent
-                                    : Colors.blueGrey,
-                                size: 18,
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  item.subject,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(
-                                "第 ${item.page} 页 · ${item.author}",
-                                style: TextStyle(
-                                  color: Theme.of(context).hintColor,
-                                  fontSize: 12,
-                                ),
-                              ),
-                              // 这里显示我们刚才保存的 "12-14 · 读至 25楼"
-                              Text(
-                                item.savedTime,
-                                style: TextStyle(
-                                  color: Theme.of(context).primaryColor,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
                   ),
-                );
-              },
-            ),
+                ),
+              SafeArea(
+                child: _bookmarks.isEmpty
+                    ? const Center(
+                        child: Text(
+                          "暂无书签",
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.only(top: 10),
+                        itemCount: _bookmarks.length,
+                        itemBuilder: (context, index) {
+                          final item = _bookmarks[index];
+                          return Card(
+                            margin: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 6,
+                            ),
+                            elevation: 0,
+                            color: wallpaperPath != null
+                                ? Theme.of(context)
+                                      .colorScheme
+                                      .surfaceContainerHighest
+                                      .withOpacity(0.7)
+                                : Theme.of(
+                                    context,
+                                  ).colorScheme.surfaceContainerHighest,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              // 【点击】跳转
+                              onTap: () {
+                                String? targetFloor;
+                                if (item.savedTime.contains("读至 ")) {
+                                  targetFloor = item.savedTime
+                                      .split("读至 ")
+                                      .last;
+                                }
+
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (context) => ThreadDetailPage(
+                                      tid: item.tid,
+                                      subject: item.subject,
+                                      initialPage: item.page,
+                                      initialNovelMode: item.isNovelMode,
+                                      initialAuthorId: item.authorId,
+                                      initialTargetFloor:
+                                          targetFloor, // 【新增】传进去
+                                    ),
+                                  ),
+                                );
+                              },
+                              // 【长按】删除
+                              onLongPress: () => _confirmDelete(index),
+                              child: Padding(
+                                padding: const EdgeInsets.all(16.0),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Icon(
+                                          item.isNovelMode
+                                              ? Icons.auto_stories
+                                              : Icons.article,
+                                          color: item.isNovelMode
+                                              ? Colors.purpleAccent
+                                              : Colors.blueGrey,
+                                          size: 18,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            item.subject,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          "第 ${item.page} 页 · ${item.author}",
+                                          style: TextStyle(
+                                            color: Theme.of(context).hintColor,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                        // 这里显示我们刚才保存的 "12-14 · 读至 25楼"
+                                        Text(
+                                          item.savedTime,
+                                          style: TextStyle(
+                                            color: Theme.of(
+                                              context,
+                                            ).primaryColor,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

@@ -11,6 +11,10 @@ import 'bookmark_page.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'user_detail_page.dart'; // 用于跳转
 import 'dart:io';
+import 'package:permission_handler/permission_handler.dart'; // 用于跳转系统设置
+import 'package:url_launcher/url_launcher.dart';
+
+import 'package:image_picker/image_picker.dart';
 
 // 全局状态
 final ValueNotifier<String> currentUser = ValueNotifier("未登录");
@@ -20,6 +24,10 @@ final ValueNotifier<String> currentUserUid = ValueNotifier("");
 final ValueNotifier<String> currentUserAvatar = ValueNotifier("");
 // 全局主题状态
 final ValueNotifier<ThemeMode> currentTheme = ValueNotifier(ThemeMode.system);
+// 【新增】自定义壁纸路径
+final ValueNotifier<String?> customWallpaperPath = ValueNotifier(null);
+final ValueNotifier<bool> transparentBarsEnabled = ValueNotifier(false);
+
 final GlobalKey<_ForumHomePageState> forumKey = GlobalKey();
 
 void main() async {
@@ -31,6 +39,10 @@ void main() async {
   // 【新增】加载本地存储的 UID 和 头像
   currentUserUid.value = prefs.getString('uid') ?? "";
   currentUserAvatar.value = prefs.getString('avatar') ?? "";
+  // 【新增】加载壁纸路径
+  customWallpaperPath.value = prefs.getString('custom_wallpaper');
+  transparentBarsEnabled.value = prefs.getBool('transparent_bars') ?? false;
+
   String? themeStr = prefs.getString('theme_mode');
   if (themeStr == 'dark')
     currentTheme.value = ThemeMode.dark;
@@ -100,26 +112,84 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: IndexedStack(index: _selectedIndex, children: _pages),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _selectedIndex,
-        onDestinationSelected: (int index) =>
-            setState(() => _selectedIndex = index),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home),
-            label: '大厅',
+    return ValueListenableBuilder<String?>(
+      valueListenable: customWallpaperPath,
+      builder: (context, wallpaperPath, child) {
+        return Scaffold(
+          // 如果有壁纸，Scaffold 背景透明
+          backgroundColor: wallpaperPath != null ? Colors.transparent : null,
+          extendBody: wallpaperPath != null && transparentBarsEnabled.value,
+          body: Stack(
+            children: [
+              // 1. 背景层
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: Image.file(
+                    File(wallpaperPath),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox(),
+                  ),
+                ),
+              // 2. 遮罩层 (适配暗黑模式)
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: ValueListenableBuilder<ThemeMode>(
+                    valueListenable: currentTheme,
+                    builder: (context, mode, _) {
+                      bool isDark = mode == ThemeMode.dark;
+                      if (mode == ThemeMode.system) {
+                        isDark =
+                            MediaQuery.of(context).platformBrightness ==
+                            Brightness.dark;
+                      }
+                      return Container(
+                        color: isDark
+                            ? Colors.black.withOpacity(0.6) // 暗黑模式加深遮罩
+                            : Colors.white.withOpacity(0.3), // 亮色模式轻微遮罩
+                      );
+                    },
+                  ),
+                ),
+              // 3. 内容层
+              IndexedStack(index: _selectedIndex, children: _pages),
+            ],
           ),
-          NavigationDestination(icon: Icon(Icons.search), label: '搜索'),
-          NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            selectedIcon: Icon(Icons.person),
-            label: '我的',
+          bottomNavigationBar: ValueListenableBuilder<bool>(
+            valueListenable: transparentBarsEnabled,
+            builder: (context, enabled, _) {
+              final bool useTransparent = wallpaperPath != null && enabled;
+              return NavigationBar(
+                backgroundColor: useTransparent
+                    ? Colors.transparent
+                    : (wallpaperPath != null
+                          ? (Theme.of(context).brightness == Brightness.dark
+                                ? Colors.black.withOpacity(0.4)
+                                : Colors.white.withOpacity(0.6))
+                          : null),
+                elevation: wallpaperPath != null ? 0 : 3,
+                indicatorColor: Theme.of(context).colorScheme.secondaryContainer
+                    .withOpacity(useTransparent ? 0.6 : 0.8),
+                selectedIndex: _selectedIndex,
+                onDestinationSelected: (int index) =>
+                    setState(() => _selectedIndex = index),
+                destinations: const [
+                  NavigationDestination(
+                    icon: Icon(Icons.home_outlined),
+                    selectedIcon: Icon(Icons.home),
+                    label: '大厅',
+                  ),
+                  NavigationDestination(icon: Icon(Icons.search), label: '搜索'),
+                  NavigationDestination(
+                    icon: Icon(Icons.person_outline),
+                    selectedIcon: Icon(Icons.person),
+                    label: '我的',
+                  ),
+                ],
+              );
+            },
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -233,44 +303,22 @@ class _ForumHomePageState extends State<ForumHomePage> {
     _fetchData();
   }
 
-  // 新增一个带 Cookie 的加载方法
-  // 在 _ForumHomePageState 类中
-
-  // 统一的加载方法
-  // 在 _ForumHomePageState 类中
-
-  // ==========================================
-  // 1. 强制刷新并带 Cookie 请求的方法
-  // ==========================================
-  Future<void> _fetchDataWithCookie(String cookie) async {
-    if (!mounted) return;
-    setState(() {
-      _isLoading = true;
-    });
-
-    // 【核心修复】请求前强制清除 WebView 缓存
-    await _hiddenController.clearCache();
-
-    final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-    final String apiUrl =
-        'https://www.giantessnight.com/gnforum2012/api/mobile/index.php?version=4&module=forumindex&t=$timestamp';
-
-    print("🚀 [强制刷新] 请求主页数据: $apiUrl");
-
-    _hiddenController.loadRequest(
-      Uri.parse(apiUrl),
-      headers: {'Cookie': cookie, 'User-Agent': kUserAgent},
-    );
-  }
-
   // ==========================================
   // 2. 初始预热方法
   // ==========================================
-  void _fetchData() {
+  void _fetchData() async {
     if (!mounted) return;
     setState(() {
       _isLoading = true;
     });
+
+    // 【新增】每次刷新前清理 WebView 缓存，确保 Cookie 状态重置
+    // 这样能解决"第一次行第二次不行"的问题
+    try {
+      await _hiddenController.clearCache();
+    } catch (e) {
+      // 忽略清理失败
+    }
 
     print("🔄 开始预热 Session (身份统一: 手机版)...");
 
@@ -342,19 +390,30 @@ class _ForumHomePageState extends State<ForumHomePage> {
       // 1. 更新用户信息
       String newName = variables['member_username'].toString();
       String newUid = variables['member_uid'].toString();
+      final prefs = await SharedPreferences.getInstance();
 
-      if (newName.isNotEmpty && newName != currentUser.value) {
-        final prefs = await SharedPreferences.getInstance();
-        currentUser.value = newName;
-        await prefs.setString('username', newName);
+      // 只要服务器返回了有效的用户名，就更新状态
+      if (newName.isNotEmpty) {
+        if (newName != currentUser.value) {
+          currentUser.value = newName;
+          await prefs.setString('username', newName);
+        }
 
+        // 独立更新 UID 和头像 (不依赖用户名是否变化)
         if (newUid.isNotEmpty && newUid != "0") {
-          currentUserUid.value = newUid;
-          await prefs.setString('uid', newUid);
+          if (newUid != currentUserUid.value) {
+            currentUserUid.value = newUid;
+            await prefs.setString('uid', newUid);
+          }
+
           String avatarUrl =
               "https://www.giantessnight.com/gnforum2012/uc_server/avatar.php?uid=$newUid&size=middle";
-          currentUserAvatar.value = avatarUrl;
-          await prefs.setString('avatar', avatarUrl);
+
+          // 确保头像 URL 被设置 (即使用户名没变)
+          if (currentUserAvatar.value != avatarUrl) {
+            currentUserAvatar.value = avatarUrl;
+            await prefs.setString('avatar', avatarUrl);
+          }
         }
       }
 
@@ -419,7 +478,17 @@ class _ForumHomePageState extends State<ForumHomePage> {
           },
           child: CustomScrollView(
             slivers: [
-              const SliverAppBar.large(title: Text("GiantessNight")),
+              ValueListenableBuilder<String?>(
+                valueListenable: customWallpaperPath,
+                builder: (context, wallpaperPath, _) {
+                  bool useTransparent =
+                      wallpaperPath != null && transparentBarsEnabled.value;
+                  return SliverAppBar.large(
+                    title: const Text("GiantessNight"),
+                    backgroundColor: useTransparent ? Colors.transparent : null,
+                  );
+                },
+              ),
               if (_isLoading)
                 const SliverToBoxAdapter(child: LinearProgressIndicator()),
               if (_categories.isEmpty && !_isLoading)
@@ -474,76 +543,112 @@ class _ForumHomePageState extends State<ForumHomePage> {
   }
 
   Widget _buildForumTile(Forum forum) {
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      elevation: 0,
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
-      child: InkWell(
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) =>
-                ThreadListPage(fid: forum.fid, forumName: forum.name),
-          ),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+    return ValueListenableBuilder<String?>(
+      valueListenable: customWallpaperPath,
+      builder: (context, wallpaperPath, _) {
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          elevation: 0,
+          color: wallpaperPath != null
+              ? Theme.of(
+                  context,
+                ).colorScheme.surfaceContainerLow.withOpacity(0.7)
+              : Theme.of(context).colorScheme.surfaceContainerLow,
+          child: InkWell(
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) =>
+                    ThreadListPage(fid: forum.fid, forumName: forum.name),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Text(
-                      forum.name,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  if (int.tryParse(forum.todayposts) != null &&
-                      int.parse(forum.todayposts) > 0)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 2,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.errorContainer,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        "+${forum.todayposts}",
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.onErrorContainer,
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold,
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          forum.name,
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.bold),
                         ),
                       ),
+                      if (int.tryParse(forum.todayposts) != null &&
+                          int.parse(forum.todayposts) > 0)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context).colorScheme.errorContainer,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            "+${forum.todayposts}",
+                            style: TextStyle(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onErrorContainer,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  if (forum.description.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      forum.description,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: wallpaperPath != null
+                            ? Theme.of(
+                                context,
+                              ).colorScheme.onSurface.withOpacity(0.8)
+                            : Colors.grey[600],
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
+                  ],
                 ],
               ),
-              if (forum.description.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Text(
-                  forum.description,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(color: Colors.grey[600]),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
 
-class ProfilePage extends StatelessWidget {
+class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
+
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  // 【新增】监听壁纸变化
+  @override
+  void initState() {
+    super.initState();
+    customWallpaperPath.addListener(_onWallpaperChanged);
+  }
+
+  @override
+  void dispose() {
+    customWallpaperPath.removeListener(_onWallpaperChanged);
+    super.dispose();
+  }
+
+  void _onWallpaperChanged() {
+    if (mounted) setState(() {});
+  }
 
   void _toggleTheme() async {
     final prefs = await SharedPreferences.getInstance();
@@ -554,6 +659,75 @@ class ProfilePage extends StatelessWidget {
       currentTheme.value = ThemeMode.light;
       await prefs.setString('theme_mode', 'light');
     }
+  }
+
+  // 【新增】显示清理缓存选项弹窗
+  // 【修正版】显示清理缓存选项弹窗
+  void _showClearCacheDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text("清除缓存"),
+          content: const Text(
+            "图片缓存通常占用了大部分空间。\n\n"
+            "• 清理图片：释放空间，保留登录状态 (推荐)\n"
+            "• 系统清理：跳转至设置，可选择清除全部数据",
+            style: TextStyle(fontSize: 14),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("取消", style: TextStyle(color: Colors.grey)),
+            ),
+            // 选项 1：跳转系统设置
+            TextButton(
+              onPressed: () {
+                // 这里调用 permission_handler 库的方法
+                openAppSettings();
+                Navigator.pop(ctx);
+              },
+              child: const Text("系统设置"),
+            ),
+            // 选项 2：只清理图片 (最常用)
+            FilledButton(
+              onPressed: () async {
+                Navigator.pop(ctx); // 先关弹窗
+
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text("正在清理图片缓存..."),
+                    duration: Duration(
+                      milliseconds: 500,
+                    ), // 【修复】duration 是 SnackBar 的参数，放在 Text 外面
+                  ),
+                );
+
+                try {
+                  // 1. 清理全局自定义图片缓存 (需确保引入了 forum_model.dart)
+                  await globalImageCache.emptyCache();
+                  // 2. 清理默认图片缓存
+                  await DefaultCacheManager().emptyCache();
+
+                  // 注意：这里我们故意 不调用 WebViewController().clearCache()
+                  // 也不调用 WebViewCookieManager().clearCookies()
+                  // 这样既不会闪退，也不会掉登录
+
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text("✨ 图片缓存已释放，登录状态保留")),
+                    );
+                  }
+                } catch (e) {
+                  print("清理失败: $e");
+                }
+              },
+              child: const Text("清理图片"),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   // 【新增】跳转到我的帖子
@@ -576,11 +750,91 @@ class ProfilePage extends StatelessWidget {
     }
   }
 
+  // 【新增】显示关于弹窗
+  void _showAboutDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("关于"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("GiantessNight 第三方客户端"),
+            const SizedBox(height: 8),
+            const Text("这是一个非官方的第三方客户端，旨在提供更好的移动端阅读体验。"),
+            const SizedBox(height: 16),
+            InkWell(
+              onTap: () async {
+                final Uri url = Uri.parse(
+                  "https://github.com/fangzny1/GiantessNight_App",
+                );
+                if (!await launchUrl(
+                  url,
+                  mode: LaunchMode.externalApplication,
+                )) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(const SnackBar(content: Text("无法打开链接")));
+                }
+              },
+              child: const Text(
+                "https://github.com/fangzny1/GiantessNight_App",
+                style: TextStyle(
+                  color: Colors.blue,
+                  decoration: TextDecoration.underline,
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("确定"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 【新增】选择背景图片
+  Future<void> _pickWallpaper(BuildContext context) async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+
+    if (image != null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('custom_wallpaper', image.path);
+      customWallpaperPath.value = image.path;
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text("背景设置成功！")));
+      }
+    }
+  }
+
+  // 【新增】清除背景图片
+  Future<void> _clearWallpaper(BuildContext context) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('custom_wallpaper');
+    customWallpaperPath.value = null;
+    if (context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("已恢复默认背景")));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      // 如果有壁纸，Scaffold 背景透明
+      backgroundColor: Colors.transparent, // 关键：让 ProfilePage 本身透明
       appBar: AppBar(
         title: const Text("个人中心"),
+        backgroundColor: Colors.transparent, // AppBar 也透明
+        elevation: 0,
         actions: [
           ValueListenableBuilder<ThemeMode>(
             valueListenable: currentTheme,
@@ -740,25 +994,58 @@ class ProfilePage extends StatelessWidget {
                   color: Colors.blueGrey,
                 ),
                 title: const Text("清除缓存"),
+                subtitle: const Text("管理存储空间"), // 加个副标题更好看
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () async {
-                  // 1. 清理 WebView 缓存
-                  await WebViewController().clearCache();
+                // 【修改】点击不再直接清理，而是弹窗询问
+                onTap: () => _showClearCacheDialog(context),
+              ),
+              const Divider(),
 
-                  // 2. 【核心修复】清理我们自定义的全局图片缓存
-                  await globalImageCache.emptyCache();
-
-                  // 3. (可选) 清理默认缓存，防止有漏网之鱼
-                  await DefaultCacheManager().emptyCache();
-
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text("🧹 缓存已彻底清理（含图片/网页）")),
-                    );
-                  }
+              // 【新增】外观设置
+              ListTile(
+                leading: const Icon(Icons.image_outlined, color: Colors.teal),
+                title: const Text("自定义背景"),
+                subtitle: const Text("设置全局背景图片"),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (customWallpaperPath.value != null)
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.grey),
+                        onPressed: () => _clearWallpaper(context),
+                      ),
+                    const Icon(Icons.chevron_right),
+                  ],
+                ),
+                onTap: () => _pickWallpaper(context),
+              ),
+              ValueListenableBuilder<bool>(
+                valueListenable: transparentBarsEnabled,
+                builder: (context, enabled, _) {
+                  bool hasWallpaper = customWallpaperPath.value != null;
+                  return SwitchListTile(
+                    title: const Text("透明导航栏与顶栏"),
+                    subtitle: const Text("需使用自定义背景"),
+                    value: hasWallpaper ? enabled : false,
+                    onChanged: hasWallpaper
+                        ? (v) async {
+                            transparentBarsEnabled.value = v;
+                            final prefs = await SharedPreferences.getInstance();
+                            await prefs.setBool('transparent_bars', v);
+                          }
+                        : null,
+                  );
                 },
               ),
 
+              // 【新增】关于
+              ListTile(
+                leading: const Icon(Icons.info_outline, color: Colors.indigo),
+                title: const Text("关于项目"),
+                subtitle: const Text("GitHub 开源地址"),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _showAboutDialog(context),
+              ),
               const Divider(),
 
               if (!isLogin)

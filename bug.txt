@@ -1,0 +1,238 @@
+这是一个**非常好的消息**！
+
+看这行日志：
+`I/flutter ( 6678): 📄 服务器返回原始内容: {"Version":"4","Charset":"UTF-8","Variables":{"cookiepre":"Lwal_2132_","auth":"033asTUq8PldUT7qa8fB8...`
+
+**这意味着：**
+1.  **网络通了！** 你的 IPv4 和 VPN 设置生效了。
+2.  **登录成功了！** 服务器返回了 `auth` 字段，没有返回 `to_login`，说明 Cookie 注入完美生效。
+
+**那为什么界面还是没加载出来？**
+问题出在 **数据解析（JSON Parsing）** 上。
+Discuz 的 API 有个著名的“坑”：**PHP 的数组有时候返回的是列表 `[]`，有时候返回的是对象 `{}`（键值对）**。
+Flutter 尝试把一个 `{}` 当作 `[]` 去遍历，就会直接报错中断，导致界面卡在加载中。
+
+---
+
+### 🛠️ 解决方案：增强数据解析的兼容性
+
+我们需要修改两个文件，让 APP 能够容忍 Discuz 这种“随心所欲”的数据格式。
+
+#### 第一步：修改 `lib/forum_model.dart` (防爆解析)
+
+我们要确保无论服务器给的是数字还是字符串，还是空值，模型都能安全转换，不会报错。
+
+请**完全覆盖** `lib/forum_model.dart`：
+
+```dart
+// lib/forum_model.dart
+
+class Category {
+  final String fid;
+  final String name;
+  final List<String> forumIds;
+
+  Category({required this.fid, required this.name, required this.forumIds});
+
+  factory Category.fromJson(Map<String, dynamic> json) {
+    // Discuz 的 forums 字段有时候是 List，有时候是 null
+    List<String> fids = [];
+    if (json['forums'] != null && json['forums'] is List) {
+      fids = List<String>.from(json['forums']);
+    }
+    
+    return Category(
+      fid: json['fid']?.toString() ?? '',
+      name: json['name']?.toString() ?? '', // 强制转 String，防止 null
+      forumIds: fids,
+    );
+  }
+}
+
+class Forum {
+  final String fid;
+  final String name;
+  final String threads;
+  final String posts;
+  final String description;
+  final String todayposts;
+
+  Forum({
+    required this.fid,
+    required this.name,
+    required this.threads,
+    required this.posts,
+    required this.description,
+    required this.todayposts,
+  });
+
+  factory Forum.fromJson(Map<String, dynamic> json) {
+    return Forum(
+      fid: json['fid']?.toString() ?? '',
+      name: json['name']?.toString() ?? '',
+      threads: json['threads']?.toString() ?? '0', // 即使是 int 也能转 string
+      posts: json['posts']?.toString() ?? '0',
+      description: json['description']?.toString() ?? '',
+      todayposts: json['todayposts']?.toString() ?? '0',
+    );
+  }
+}
+
+class Thread {
+  final String tid;
+  final String subject;
+  final String author;
+  final String replies;
+  final String views;
+  final String readperm;
+
+  Thread({
+    required this.tid,
+    required this.subject,
+    required this.author,
+    required this.replies,
+    required this.views,
+    required this.readperm,
+  });
+
+  factory Thread.fromJson(Map<String, dynamic> json) {
+    return Thread(
+      tid: json['tid']?.toString() ?? '',
+      subject: json['subject']?.toString() ?? '无标题',
+      author: json['author']?.toString() ?? '匿名',
+      replies: json['replies']?.toString() ?? '0',
+      views: json['views']?.toString() ?? '0',
+      readperm: json['readperm']?.toString() ?? '0',
+    );
+  }
+}
+
+class PostInfo {
+  final String pid;
+  final String author;
+  final String avatarUrl;
+  final String time;
+  final String contentHtml;
+
+  PostInfo({
+    required this.pid,
+    required this.author,
+    required this.avatarUrl,
+    required this.time,
+    required this.contentHtml,
+  });
+}
+
+class BookmarkItem {
+  final String tid;
+  final String subject;
+  final String author;
+  final String authorId;
+  final int page;
+  final String savedTime;
+  final bool isNovelMode;
+
+  BookmarkItem({
+    required this.tid,
+    required this.subject,
+    required this.author,
+    required this.authorId,
+    required this.page,
+    required this.savedTime,
+    this.isNovelMode = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'tid': tid,
+    'subject': subject,
+    'author': author,
+    'authorId': authorId,
+    'page': page,
+    'savedTime': savedTime,
+    'isNovelMode': isNovelMode,
+  };
+
+  factory BookmarkItem.fromJson(Map<String, dynamic> json) {
+    return BookmarkItem(
+      tid: json['tid'] ?? "",
+      subject: json['subject'] ?? "",
+      author: json['author'] ?? "",
+      authorId: json['authorId'] ?? "",
+      page: json['page'] ?? 1,
+      savedTime: json['savedTime'] ?? "",
+      isNovelMode: json['isNovelMode'] ?? false,
+    );
+  }
+}
+```
+
+#### 第二步：修改 `lib/main.dart` (处理 JSON 结构变异)
+
+请在 `_ForumHomePageState` 类中，找到 `_parsePageContent` 方法，修改**中间解析 `Variables` 的部分**。
+
+**重点修改逻辑：** 检查 `catlist` 和 `forumlist` 到底是 List 还是 Map（PHP 经常把空数组变成空对象），如果是 Map 还是 List，我们都把它统一转成 List。
+
+```dart
+      // ... (前面检查 Variables == null 的代码不变) ...
+
+      var variables = data['Variables'];
+      
+      // ... (中间更新 username / uid / avatar 的代码不变) ...
+
+      // === 【核心修复】兼容 PHP 数组/对象变异 ===
+      
+      List<Category> tempCats = [];
+      var rawCatList = variables['catlist'];
+
+      // 1. 解析 catlist (可能是 List 也可能是 Map)
+      if (rawCatList != null) {
+        if (rawCatList is List) {
+          tempCats = rawCatList.map((e) => Category.fromJson(e)).toList();
+        } else if (rawCatList is Map) {
+          // 如果是 Map {"0": {...}, "1": {...}}，转成 List
+          rawCatList.forEach((k, v) {
+            tempCats.add(Category.fromJson(v));
+          });
+        }
+      }
+
+      // 2. 解析 forumlist (同理)
+      Map<String, Forum> tempForumMap = {};
+      var rawForumList = variables['forumlist'];
+      
+      if (rawForumList != null) {
+        if (rawForumList is List) {
+          for (var f in rawForumList) {
+            var forum = Forum.fromJson(f);
+            tempForumMap[forum.fid] = forum;
+          }
+        } else if (rawForumList is Map) {
+          rawForumList.forEach((k, v) {
+            var forum = Forum.fromJson(v);
+            tempForumMap[forum.fid] = forum;
+          });
+        }
+      }
+
+      print("✅ 解析成功: 获取到 ${tempCats.length} 个分区, ${tempForumMap.length} 个板块");
+
+      if (mounted) {
+        setState(() {
+          _categories = tempCats;
+          _forumsMap = tempForumMap;
+          _isLoading = false; // 关掉加载条
+        });
+      }
+    } catch (e) {
+      print("❌ 解析过程报错: $e"); // 如果还有错，这行会告诉我们
+      if (mounted) setState(() { _isLoading = false; });
+    }
+```
+
+### 总结
+
+1.  **数据到了**：你的日志证明网络和 Cookie 都没问题了，这是最大的胜利。
+2.  **解析挂了**：是因为 Discuz 返回的数据结构不稳定（有时候是 `[]` 有时候是 `{}`），之前的代码太老实，遇到类型不对就崩了。
+3.  **修复后**：新的代码会智能判断是 List 还是 Map，并且把所有字段都强制转成 String，主页列表应该就能顺利渲染出来了！
+
+快试试吧，这次离成功真的只差这一步解析了！

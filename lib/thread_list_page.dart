@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'dart:convert';
+import 'dart:io';
 import 'forum_model.dart';
 import 'login_page.dart';
 import 'thread_detail_page.dart';
-import 'user_detail_page.dart';
+
+import 'main.dart'; // 引入 main.dart 以访问 customWallpaperPath
 
 class ThreadListPage extends StatefulWidget {
   final String fid;
@@ -269,34 +271,80 @@ class _ThreadListPageState extends State<ThreadListPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Stack(
-        children: [
-          NestedScrollView(
-            headerSliverBuilder: (context, innerBoxIsScrolled) {
-              return [
-                SliverAppBar.large(
-                  title: Text(widget.forumName),
-                  actions: [
-                    Center(
-                      child: Padding(
-                        padding: EdgeInsets.only(right: 16),
-                        child: Text("${_threads.length} 帖"),
-                      ),
-                    ),
-                  ],
+    return ValueListenableBuilder<String?>(
+      valueListenable: customWallpaperPath,
+      builder: (context, wallpaperPath, _) {
+        return Scaffold(
+          // 如果有全局壁纸，这里设为透明
+          backgroundColor: wallpaperPath != null ? Colors.transparent : null,
+          body: Stack(
+            children: [
+              // 如果是独立页面（非 main tab），需要在这里也显示背景？
+              // 不，通常 ThreadListPage 是 push 进来的，覆盖了 MainScreen。
+              // 所以如果 MainScreen 的背景要透过来，ThreadListPage 必须透明。
+              // 但是 Navigator push 会把下面的页面遮挡（默认是不透明的？不，是 stack）。
+              // 实际上，如果不再次绘制背景，底下可能是黑的或者上一个页面。
+              // 为了统一体验，建议在这里也绘制背景。
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: Image.file(
+                    File(wallpaperPath),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox(),
+                  ),
                 ),
-              ];
-            },
-            body: _buildList(),
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: ValueListenableBuilder<ThemeMode>(
+                    valueListenable: currentTheme,
+                    builder: (context, mode, _) {
+                      bool isDark = mode == ThemeMode.dark;
+                      if (mode == ThemeMode.system) {
+                        isDark =
+                            MediaQuery.of(context).platformBrightness ==
+                            Brightness.dark;
+                      }
+                      return Container(
+                        color: isDark
+                            ? Colors.black.withOpacity(0.6)
+                            : Colors.white.withOpacity(0.3),
+                      );
+                    },
+                  ),
+                ),
+
+              NestedScrollView(
+                headerSliverBuilder: (context, innerBoxIsScrolled) {
+                  return [
+                    SliverAppBar.large(
+                      title: Text(widget.forumName),
+                      backgroundColor:
+                          (wallpaperPath != null &&
+                              transparentBarsEnabled.value)
+                          ? Colors.transparent
+                          : null,
+                      actions: [
+                        Center(
+                          child: Padding(
+                            padding: EdgeInsets.only(right: 16),
+                            child: Text("${_threads.length} 帖"),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ];
+                },
+                body: _buildList(),
+              ),
+              SizedBox(
+                height: 0,
+                width: 0,
+                child: WebViewWidget(controller: _hiddenController),
+              ),
+            ],
           ),
-          SizedBox(
-            height: 0,
-            width: 0,
-            child: WebViewWidget(controller: _hiddenController),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -354,31 +402,46 @@ class _ThreadListPageState extends State<ThreadListPage> {
     }
   }
 
+  // 还需要引入 import 'dart:io';
   Widget _buildCard(Thread thread) {
     // (保持不变，省略以节省篇幅，复制之前的即可)
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      elevation: 0,
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
-      child: ListTile(
-        title: Text(
-          thread.subject,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontWeight: FontWeight.bold),
-        ),
-        subtitle: Text(
-          "${thread.author} • ${thread.replies} 回复",
-          style: const TextStyle(fontSize: 12, color: Colors.grey),
-        ),
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) =>
-                ThreadDetailPage(tid: thread.tid, subject: thread.subject),
+    return ValueListenableBuilder<String?>(
+      valueListenable: customWallpaperPath,
+      builder: (context, wallpaperPath, _) {
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          elevation: 0,
+          color: wallpaperPath != null
+              ? Theme.of(
+                  context,
+                ).colorScheme.surfaceContainerLow.withOpacity(0.7)
+              : Theme.of(context).colorScheme.surfaceContainerLow,
+          child: ListTile(
+            title: Text(
+              thread.subject,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            subtitle: Text(
+              "${thread.author} • ${thread.replies} 回复",
+              style: TextStyle(
+                fontSize: 12,
+                color: wallpaperPath != null
+                    ? Theme.of(context).colorScheme.onSurface.withOpacity(0.6)
+                    : Colors.grey,
+              ),
+            ),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) =>
+                    ThreadDetailPage(tid: thread.tid, subject: thread.subject),
+              ),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }

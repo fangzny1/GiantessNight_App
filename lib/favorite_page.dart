@@ -3,17 +3,21 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'login_page.dart';
 import 'thread_detail_page.dart';
+import 'dart:io';
+import 'main.dart'; // 用于访问 customWallpaperPath 和 currentTheme
 
 // 简单的收藏模型
 class FavoriteItem {
   final String tid;
   final String title;
   final String description;
+  final String favid; // 新增 favid
 
   FavoriteItem({
     required this.tid,
     required this.title,
     required this.description,
+    required this.favid,
   });
 }
 
@@ -40,10 +44,33 @@ class _FavoritePageState extends State<FavoritePage> {
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setUserAgent(kUserAgent)
       ..setNavigationDelegate(
-        NavigationDelegate(onPageFinished: (url) => _parseFavorites()),
+        NavigationDelegate(
+          onPageFinished: (url) {
+            // 如果是列表页，解析
+            if (url.contains("do=favorite")) {
+              _parseFavorites();
+            }
+            // 如果是删除确认页，自动点击确定
+            else if (url.contains("op=delete") && url.contains("ac=favorite")) {
+              _hiddenController.runJavaScript(
+                "var btn = document.querySelector('button[name=\"deletesubmitbtn\"]'); if(btn) btn.click();",
+              );
+              // 删除后刷新列表
+              Future.delayed(const Duration(seconds: 1), () {
+                _loadFavorites();
+              });
+            }
+          },
+        ),
       );
 
-    // 加载收藏夹页面
+    _loadFavorites();
+  }
+
+  void _loadFavorites() {
+    setState(() {
+      _isLoading = true;
+    });
     _hiddenController.loadRequest(
       Uri.parse(
         'https://www.giantessnight.com/gnforum2012/home.php?mod=space&do=favorite&view=me&mobile=no',
@@ -87,9 +114,23 @@ class _FavoritePageState extends State<FavoritePage> {
           // 提取描述 (收藏时写的备注)
           String desc = item.querySelector('.xg1')?.text ?? "";
 
+          // 提取 favid
+          String favid = "";
+          var delLink = item.querySelector('a[href*="op=delete"]');
+          if (delLink != null) {
+            String delHref = delLink.attributes['href'] ?? "";
+            RegExp favidReg = RegExp(r'favid=(\d+)');
+            favid = favidReg.firstMatch(delHref)?.group(1) ?? "";
+          }
+
           if (tid.isNotEmpty) {
             newList.add(
-              FavoriteItem(tid: tid, title: title, description: desc),
+              FavoriteItem(
+                tid: tid,
+                title: title,
+                description: desc,
+                favid: favid,
+              ),
             );
           }
         } catch (e) {
@@ -111,51 +152,156 @@ class _FavoritePageState extends State<FavoritePage> {
     }
   }
 
+  void _showDeleteConfirmDialog(String favid, String title) {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text("取消收藏"),
+          content: Text("确定要取消收藏“$title”吗？"),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("再想想"),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _deleteFavorite(favid);
+              },
+              child: const Text("确定取消", style: TextStyle(color: Colors.red)),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _deleteFavorite(String favid) {
+    if (favid.isEmpty) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text("正在取消收藏...")));
+    // 构造删除链接
+    String delUrl =
+        "https://www.giantessnight.com/gnforum2012/home.php?mod=spacecp&ac=favorite&op=delete&favid=$favid&type=all";
+    _hiddenController.loadRequest(Uri.parse(delUrl));
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text("我的收藏")),
-      body: Stack(
-        children: [
-          _isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : _favorites.isEmpty
-              ? const Center(child: Text("暂无收藏"))
-              : ListView.builder(
-                  itemCount: _favorites.length,
-                  itemBuilder: (context, index) {
-                    final fav = _favorites[index];
-                    return ListTile(
-                      leading: const Icon(Icons.star, color: Colors.orange),
-                      title: Text(
-                        fav.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: fav.description.isNotEmpty
-                          ? Text(fav.description)
-                          : null,
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => ThreadDetailPage(
-                              tid: fav.tid,
-                              subject: fav.title,
-                            ),
-                          ),
-                        );
-                      },
-                    );
-                  },
-                ),
-          SizedBox(
-            height: 0,
-            width: 0,
-            child: WebViewWidget(controller: _hiddenController),
+    return ValueListenableBuilder<String?>(
+      valueListenable: customWallpaperPath,
+      builder: (context, wallpaperPath, _) {
+        bool useTransparent =
+            wallpaperPath != null && transparentBarsEnabled.value;
+        return Scaffold(
+          backgroundColor: useTransparent ? Colors.transparent : null,
+          extendBodyBehindAppBar: useTransparent,
+          appBar: AppBar(
+            title: const Text("我的收藏"),
+            backgroundColor: useTransparent ? Colors.transparent : null,
+            elevation: useTransparent ? 0 : null,
           ),
-        ],
-      ),
+          body: Stack(
+            children: [
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: Image.file(
+                    File(wallpaperPath),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox(),
+                  ),
+                ),
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: ValueListenableBuilder<ThemeMode>(
+                    valueListenable: currentTheme,
+                    builder: (context, mode, _) {
+                      bool isDark = mode == ThemeMode.dark;
+                      if (mode == ThemeMode.system) {
+                        isDark =
+                            MediaQuery.of(context).platformBrightness ==
+                            Brightness.dark;
+                      }
+                      return Container(
+                        color: isDark
+                            ? Colors.black.withOpacity(0.6)
+                            : Colors.white.withOpacity(0.3),
+                      );
+                    },
+                  ),
+                ),
+              SafeArea(
+                child: _isLoading
+                    ? const Center(child: CircularProgressIndicator())
+                    : _favorites.isEmpty
+                    ? const Center(child: Text("暂无收藏"))
+                    : ListView.builder(
+                        itemCount: _favorites.length,
+                        itemBuilder: (context, index) {
+                          final fav = _favorites[index];
+                          return Card(
+                            color: wallpaperPath != null
+                                ? Theme.of(context).cardColor.withOpacity(0.7)
+                                : null,
+                            margin: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            elevation: wallpaperPath != null ? 0 : 1,
+                            child: ListTile(
+                              leading: const Icon(
+                                Icons.star,
+                                color: Colors.orange,
+                              ),
+                              title: Text(
+                                fav.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: fav.description.isNotEmpty
+                                  ? Text(fav.description)
+                                  : null,
+                              onTap: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (context) => ThreadDetailPage(
+                                      tid: fav.tid,
+                                      subject: fav.title,
+                                    ),
+                                  ),
+                                );
+                              },
+                              onLongPress: () {
+                                if (fav.favid.isNotEmpty) {
+                                  _showDeleteConfirmDialog(
+                                    fav.favid,
+                                    fav.title,
+                                  );
+                                } else {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text("无法获取收藏ID，暂不能删除"),
+                                    ),
+                                  );
+                                }
+                              },
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              SizedBox(
+                height: 0,
+                width: 0,
+                child: WebViewWidget(controller: _hiddenController),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

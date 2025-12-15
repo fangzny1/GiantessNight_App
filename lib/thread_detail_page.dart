@@ -9,7 +9,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cached_network_image/cached_network_image.dart'; // 建议引入这个库
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
-
+import 'package:permission_handler/permission_handler.dart'; // 用于跳转系统设置
+import 'package:flutter_cache_manager/flutter_cache_manager.dart'; // 用于清理图片
 import 'login_page.dart';
 import 'user_detail_page.dart';
 import 'forum_model.dart';
@@ -42,6 +43,7 @@ class ThreadDetailPage extends StatefulWidget {
   final int initialPage;
   final bool initialNovelMode;
   final String? initialAuthorId;
+  final String? initialTargetFloor;
   const ThreadDetailPage({
     super.key,
     required this.tid,
@@ -49,6 +51,7 @@ class ThreadDetailPage extends StatefulWidget {
     this.initialPage = 1,
     this.initialNovelMode = false,
     this.initialAuthorId,
+    this.initialTargetFloor,
   });
 
   @override
@@ -57,9 +60,8 @@ class ThreadDetailPage extends StatefulWidget {
 
 class _ThreadDetailPageState extends State<ThreadDetailPage>
     with SingleTickerProviderStateMixin {
-  late final WebViewController _hiddenController;
-  late final WebViewController _favCheckController;
-
+  WebViewController? _hiddenController;
+  WebViewController? _favCheckController;
   final ScrollController _scrollController = ScrollController();
 
   List<PostItem> _posts = [];
@@ -136,8 +138,10 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       }
     }
 
-    _loadLocalCookie();
-    _initWebView();
+    _loadLocalCookie().then((_) {
+      _initWebView();
+      _initFavCheck(); // 等 Cookie 加载完再初始化
+    });
     // scrollListener 保持不变
     _scrollController.addListener(_onScroll);
   }
@@ -146,20 +150,19 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   void _loadPage(int page) {
     _targetPage = page;
 
-    // 【核心修复】URL 拼接逻辑
-    // 确保 page 参数必须有，而且如果只看楼主，必须带 authorid
+    // 构造 URL
     String url =
         '${_baseUrl}forum.php?mod=viewthread&tid=${widget.tid}&mobile=no';
-
     if (_isOnlyLandlord && _landlordUid != null) {
       url += '&authorid=$_landlordUid';
     }
+    url += '&page=$page';
 
-    url += '&page=$page'; // page 参数一定要放在最后，或者是追加在后面
+    print("🚀 加载帖子: 第 $page 页");
 
-    print("🚀 加载帖子(第$page页): $url");
-
-    _hiddenController.loadRequest(
+    // 【关键】使用 ?. 操作符，如果 controller 还没初始化就不执行
+    // 配合 headers 注入 Cookie
+    _hiddenController?.loadRequest(
       Uri.parse(url),
       headers: {'Cookie': _userCookies, 'User-Agent': kUserAgent},
     );
@@ -215,61 +218,79 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   }
 
   void _initWebView() {
-    _hiddenController = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(kUserAgent)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageFinished: (url) async {
-            try {
-              final String cookies =
-                  await _hiddenController.runJavaScriptReturningResult(
-                        'document.cookie',
-                      )
-                      as String;
-              String cleanCookies = cookies;
-              if (cleanCookies.startsWith('"') && cleanCookies.endsWith('"')) {
-                cleanCookies = cleanCookies.substring(
-                  1,
-                  cleanCookies.length - 1,
-                );
-              }
-              if (mounted) {
-                setState(() {
-                  _userCookies = cleanCookies;
-                });
-              }
-            } catch (e) {
-              print("Cookie 同步失败: $e");
+    // 1. 先创建对象
+    final controller = WebViewController(); //
+
+    // 2. 再配置 (这时候 controller 已经存在了，回调里可以用了)
+    // 【修复：将级联操作符拆分，避免引用歧义】
+    controller.setJavaScriptMode(JavaScriptMode.unrestricted);
+    controller.setUserAgent(kUserAgent);
+    controller.setNavigationDelegate(
+      NavigationDelegate(
+        onPageFinished: (url) async {
+          try {
+            // 这里现在可以安全使用 controller 了
+            final String cookies =
+                await controller.runJavaScriptReturningResult(
+                      //
+                      'document.cookie',
+                    )
+                    as String;
+            String cleanCookies = cookies;
+            if (cleanCookies.startsWith('"') && cleanCookies.endsWith('"')) {
+              cleanCookies = cleanCookies.substring(1, cleanCookies.length - 1);
             }
-            _parseHtmlData();
-          },
-        ),
-      );
-    _loadPage(_targetPage);
+            if (mounted) {
+              setState(() {
+                _userCookies = cleanCookies;
+              });
+            }
+          } catch (e) {
+            print("Cookie 同步失败: $e");
+          }
+          _parseHtmlData();
+        },
+      ),
+    );
+    // 3. 赋值给全局变量并刷新 UI
+    setState(() {
+      _hiddenController = controller;
+    }); //
+    _loadPage(_targetPage); //
   }
 
   void _initFavCheck() {
-    _favCheckController = WebViewController()
+    final controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setUserAgent(kUserAgent)
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (url) {
+            // 如果加载的是收藏列表页，解析它
             if (url.contains("do=favorite")) {
               _parseFavList();
-            } else if (url.contains("op=delete") &&
-                url.contains("ac=favorite")) {
-              _favCheckController.runJavaScript(
+            }
+            // 如果是执行删除后的刷新
+            else if (url.contains("op=delete") && url.contains("ac=favorite")) {
+              // 自动点击“确定删除”按钮
+              // 修复: 必须在 _favCheckController (加载收藏页面的WebView) 中执行点击，而不是主 WebView
+              _favCheckController?.runJavaScript(
                 "var btn = document.querySelector('button[name=\"deletesubmitbtn\"]'); if(btn) btn.click();",
               );
             }
           },
         ),
       );
-    _favCheckController.loadRequest(
+
+    // 加载收藏页面 (用于检查当前帖子是否已收藏)
+    controller.loadRequest(
       Uri.parse('${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no'),
+      headers: {'Cookie': _userCookies, 'User-Agent': kUserAgent},
     );
+
+    setState(() {
+      _favCheckController = controller;
+    });
   }
 
   void _loadNext() {
@@ -357,38 +378,58 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
   }
 
   void _handleFavorite() {
-    _toggleFab();
+    _toggleFab(); // 关菜单
+
     if (_isFavorited) {
+      // === 取消收藏逻辑 ===
       if (_favid != null) {
         String delUrl =
             "${_baseUrl}home.php?mod=spacecp&ac=favorite&op=delete&favid=$_favid&type=all";
-        _favCheckController.loadRequest(Uri.parse(delUrl));
+        // 后台 WebView 去请求删除链接
+        _favCheckController?.loadRequest(Uri.parse(delUrl));
+
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text("正在取消收藏...")));
-        Future.delayed(
-          const Duration(seconds: 3),
-          () => _favCheckController.reload(),
-        );
+
+        // 3秒后刷新列表确认状态
+        Future.delayed(const Duration(seconds: 3), () {
+          _favCheckController?.loadRequest(
+            Uri.parse(
+              '${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no',
+            ),
+            headers: {'Cookie': _userCookies, 'User-Agent': kUserAgent},
+          );
+        });
+
         setState(() {
           _isFavorited = false;
           _favid = null;
         });
       }
     } else {
-      _hiddenController.runJavaScript(
+      // === 添加收藏逻辑 ===
+      // 借用主 WebView 执行 JS 点击收藏按钮 (因为主 WebView 就在帖子页面)
+      _hiddenController?.runJavaScript(
         "if(document.querySelector('#k_favorite')) document.querySelector('#k_favorite').click();",
       );
+
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text("已发送收藏请求")));
       setState(() {
         _isFavorited = true;
       });
-      Future.delayed(
-        const Duration(seconds: 3),
-        () => _favCheckController.reload(),
-      );
+
+      // 3秒后刷新收藏列表获取 favid
+      Future.delayed(const Duration(seconds: 3), () {
+        _favCheckController?.loadRequest(
+          Uri.parse(
+            '${_baseUrl}home.php?mod=space&do=favorite&view=me&mobile=no',
+          ),
+          headers: {'Cookie': _userCookies, 'User-Agent': kUserAgent},
+        );
+      });
     }
   }
 
@@ -559,21 +600,27 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     _loadPage(1);
   }
 
-  // ... _parseFavList 保持不变 (略，为了节省篇幅，逻辑未变)
   Future<void> _parseFavList() async {
+    if (_favCheckController == null) return;
     try {
       final String rawHtml =
-          await _favCheckController.runJavaScriptReturningResult(
+          await _favCheckController!.runJavaScriptReturningResult(
                 "document.documentElement.outerHTML",
               )
               as String;
+
       String cleanHtml = _cleanHtml(rawHtml);
       var document = html_parser.parse(cleanHtml);
+
+      // Discuz 收藏列表通常在 id="favorite_ul"
       var items = document.querySelectorAll('ul[id="favorite_ul"] li');
       String? foundFavid;
+
       for (var item in items) {
+        // 检查有没有当前 TID 的链接
         var link = item.querySelector('a[href*="tid=${widget.tid}"]');
         if (link != null) {
+          // 如果找到了，提取 favid (用于删除)
           var delLink = item.querySelector('a[href*="op=delete"]');
           if (delLink != null) {
             String href = delLink.attributes['href'] ?? "";
@@ -586,20 +633,24 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           }
         }
       }
+
       if (mounted) {
         setState(() {
           _isFavorited = (foundFavid != null);
           _favid = foundFavid;
         });
       }
-    } catch (e) {}
+    } catch (e) {
+      print("收藏解析出错: $e");
+    }
   }
 
   // === 核心解析逻辑 ===
   Future<void> _parseHtmlData() async {
+    if (_hiddenController == null) return;
     try {
       final String rawHtml =
-          await _hiddenController.runJavaScriptReturningResult(
+          await _hiddenController!.runJavaScriptReturningResult(
                 "document.documentElement.outerHTML",
               )
               as String;
@@ -807,6 +858,43 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           _isLoadingMore = false;
           _isLoadingPrev = false;
         });
+      // 【新增】自动滚动逻辑
+      if (widget.initialTargetFloor != null) {
+        _scrollToTargetFloor();
+      }
+    }
+  }
+
+  // 简单的滚动定位
+  void _scrollToTargetFloor() {
+    if (widget.initialTargetFloor == null || _posts.isEmpty) return;
+
+    // 1. 找到目标楼层在列表中的索引
+    int targetIndex = -1;
+    for (int i = 0; i < _posts.length; i++) {
+      if (_posts[i].floor == widget.initialTargetFloor) {
+        targetIndex = i;
+        break;
+      }
+    }
+
+    if (targetIndex != -1) {
+      // 2. 延迟一点点，等渲染完成
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (_scrollController.hasClients) {
+          // 3. 估算高度滚动 (假设平均一楼 300 高度，虽然不准但能接近)
+          // 或者如果只想让用户知道，我们可以弹个提示
+          // _scrollController.jumpTo(targetIndex * 300.0);
+
+          // 更好的体验：弹窗提示用户
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("上次读到：${widget.initialTargetFloor}，已为您定位页面"),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      });
     }
   }
 
@@ -823,7 +911,21 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     }
 
     return GestureDetector(
-      onTap: () => _launchURL(fullUrl),
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ImagePreviewPage(
+              imageUrl: fullUrl,
+              headers: {
+                'Cookie': _userCookies,
+                'User-Agent': kUserAgent,
+                'Referer': _baseUrl,
+              },
+            ),
+          ),
+        );
+      },
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 8),
         child: CachedNetworkImage(
@@ -1009,7 +1111,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           NestedScrollView(
             controller: _scrollController,
             headerSliverBuilder: (context, innerBoxIsScrolled) {
-              if (_isReaderMode) return []; // 阅读模式隐藏 AppBar
+              if (_isReaderMode) return [];
               return [
                 SliverAppBar(
                   floating: false,
@@ -1017,28 +1119,41 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
                   snap: false,
                   title: Text(
                     widget.subject,
-                    style: const TextStyle(fontSize: 16),
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: _isReaderMode ? _readerTextColor : null,
+                    ),
                   ),
                   centerTitle: false,
                   elevation: 0,
                   backgroundColor: bgColor,
                   surfaceTintColor: Colors.transparent,
+                  iconTheme: IconThemeData(
+                    color: _isReaderMode ? _readerTextColor : null,
+                  ),
                 ),
               ];
             },
             body: _isReaderMode ? _buildReaderMode() : _buildNativeList(),
           ),
+
           _buildFabMenu(),
-          SizedBox(
-            height: 0,
-            width: 0,
-            child: WebViewWidget(controller: _hiddenController),
-          ),
-          SizedBox(
-            height: 0,
-            width: 0,
-            child: WebViewWidget(controller: _favCheckController),
-          ),
+
+          // === 【核心修复】空值保护 ===
+          // 只有当 controller 不为空时，才渲染 WebViewWidget
+          if (_hiddenController != null)
+            SizedBox(
+              height: 0,
+              width: 0,
+              child: WebViewWidget(controller: _hiddenController!), // 加 ! 号
+            ),
+
+          if (_favCheckController != null)
+            SizedBox(
+              height: 0,
+              width: 0,
+              child: WebViewWidget(controller: _favCheckController!), // 加 ! 号
+            ),
         ],
       ),
     );
@@ -1089,7 +1204,16 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
               _buildFabItem(
                 icon: _isFavorited ? Icons.star : Icons.star_border,
                 label: _isFavorited ? "取消收藏" : "收藏本帖",
-                color: _isFavorited ? Colors.yellow : null,
+                color: _isFavorited
+                    ? (Theme.of(context).brightness == Brightness.dark
+                          ? Colors
+                                .yellow
+                                .shade700 // 暗黑模式下使用深一点的黄
+                          : Colors
+                                .yellow
+                                .shade200 // 亮色模式下使用淡一点的黄
+                                )
+                    : null, // 未收藏时颜色为默认（通常是灰色或主题色）
                 onTap: _handleFavorite,
               ),
               const SizedBox(height: 12),

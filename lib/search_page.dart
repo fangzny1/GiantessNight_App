@@ -4,6 +4,8 @@ import 'package:html/parser.dart' as html_parser;
 import 'login_page.dart';
 import 'forum_model.dart';
 import 'thread_detail_page.dart';
+import 'dart:io';
+import 'main.dart'; // For customWallpaperPath and currentTheme
 
 class SearchPage extends StatefulWidget {
   const SearchPage({super.key});
@@ -214,36 +216,74 @@ class _SearchPageState extends State<SearchPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: TextField(
-          controller: _textController,
-          decoration: const InputDecoration(
-            hintText: "搜索帖子...",
-            border: InputBorder.none,
+    return ValueListenableBuilder<String?>(
+      valueListenable: customWallpaperPath,
+      builder: (context, wallpaperPath, _) {
+        bool useTransparent =
+            wallpaperPath != null && transparentBarsEnabled.value;
+        return Scaffold(
+          backgroundColor: useTransparent ? Colors.transparent : null,
+          extendBodyBehindAppBar: useTransparent,
+          appBar: AppBar(
+            backgroundColor: useTransparent ? Colors.transparent : null,
+            elevation: useTransparent ? 0 : null,
+            title: TextField(
+              controller: _textController,
+              decoration: const InputDecoration(
+                hintText: "搜索帖子...",
+                border: InputBorder.none,
+              ),
+              style: const TextStyle(fontSize: 18),
+              textInputAction: TextInputAction.search,
+              onSubmitted: (_) => _doSearch(),
+            ),
+            actions: [
+              IconButton(icon: const Icon(Icons.search), onPressed: _doSearch),
+            ],
           ),
-          style: const TextStyle(fontSize: 18),
-          textInputAction: TextInputAction.search,
-          onSubmitted: (_) => _doSearch(),
-        ),
-        actions: [
-          IconButton(icon: const Icon(Icons.search), onPressed: _doSearch),
-        ],
-      ),
-      body: Stack(
-        children: [
-          _buildBody(),
-          SizedBox(
-            height: 0,
-            width: 0,
-            child: WebViewWidget(controller: _hiddenController),
+          body: Stack(
+            children: [
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: Image.file(
+                    File(wallpaperPath),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox(),
+                  ),
+                ),
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: ValueListenableBuilder<ThemeMode>(
+                    valueListenable: currentTheme,
+                    builder: (context, mode, _) {
+                      bool isDark = mode == ThemeMode.dark;
+                      if (mode == ThemeMode.system) {
+                        isDark =
+                            MediaQuery.of(context).platformBrightness ==
+                            Brightness.dark;
+                      }
+                      return Container(
+                        color: isDark
+                            ? Colors.black.withOpacity(0.6)
+                            : Colors.white.withOpacity(0.3),
+                      );
+                    },
+                  ),
+                ),
+              SafeArea(child: _buildBody(wallpaperPath)),
+              SizedBox(
+                height: 0,
+                width: 0,
+                child: WebViewWidget(controller: _hiddenController),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
-  Widget _buildBody() {
+  Widget _buildBody(String? wallpaperPath) {
     if (_isLoading) return const Center(child: CircularProgressIndicator());
     if (_hasSearched && _results.isEmpty)
       return Center(child: Text(_statusMsg));
@@ -276,8 +316,12 @@ class _SearchPageState extends State<SearchPage> {
 
         final item = _results[index];
         return Card(
-          elevation: 0,
-          color: Theme.of(context).colorScheme.surfaceContainerLow,
+          elevation: wallpaperPath != null ? 0 : 0,
+          color: wallpaperPath != null
+              ? Theme.of(
+                  context,
+                ).colorScheme.surfaceContainerLow.withOpacity(0.7)
+              : Theme.of(context).colorScheme.surfaceContainerLow,
           margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           child: ListTile(
             leading: const Icon(Icons.search),

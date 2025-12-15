@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:html/parser.dart' as html_parser;
+import 'dart:io';
 import 'login_page.dart';
 import 'thread_detail_page.dart';
+import 'main.dart'; // 引入 main.dart 以访问 customWallpaperPath
 
 class UserThreadItem {
   final String tid;
@@ -224,55 +226,96 @@ class _UserDetailPageState extends State<UserDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Theme.of(context).colorScheme.surfaceContainerHigh,
-      body: Stack(
-        children: [
-          CustomScrollView(
-            controller: _scrollController, // 绑定滚动控制器
-            slivers: [
-              SliverAppBar.large(
-                title: Text("${widget.username} 的主题"),
-                actions: [
-                  if (widget.avatarUrl != null && widget.avatarUrl!.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.all(12.0),
-                      child: CircleAvatar(
-                        backgroundImage: NetworkImage(widget.avatarUrl!),
-                      ),
-                    ),
-                ],
-              ),
-
-              if (_isFirstLoading)
-                const SliverToBoxAdapter(child: LinearProgressIndicator()),
-
-              if (_threads.isEmpty && !_isFirstLoading)
-                SliverFillRemaining(
-                  child: Center(
-                    child: Text(_errorMsg.isNotEmpty ? _errorMsg : "没有找到公开的主题"),
+    return ValueListenableBuilder<String?>(
+      valueListenable: customWallpaperPath,
+      builder: (context, wallpaperPath, _) {
+        return Scaffold(
+          backgroundColor: wallpaperPath != null
+              ? Colors.transparent
+              : Theme.of(context).colorScheme.surfaceContainerHigh,
+          body: Stack(
+            children: [
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: Image.file(
+                    File(wallpaperPath),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox(),
                   ),
                 ),
-
-              SliverList(
-                delegate: SliverChildBuilderDelegate(
-                  (context, index) {
-                    if (index == _threads.length) return _buildFooter();
-                    final item = _threads[index];
-                    return _buildThreadTile(item);
-                  },
-                  childCount: _threads.length + 1, // +1 给 footer
+              if (wallpaperPath != null)
+                Positioned.fill(
+                  child: ValueListenableBuilder<ThemeMode>(
+                    valueListenable: currentTheme,
+                    builder: (context, mode, _) {
+                      bool isDark = mode == ThemeMode.dark;
+                      if (mode == ThemeMode.system) {
+                        isDark =
+                            MediaQuery.of(context).platformBrightness ==
+                            Brightness.dark;
+                      }
+                      return Container(
+                        color: isDark
+                            ? Colors.black.withOpacity(0.6)
+                            : Colors.white.withOpacity(0.3),
+                      );
+                    },
+                  ),
                 ),
+              CustomScrollView(
+                controller: _scrollController, // 绑定滚动控制器
+                slivers: [
+                  SliverAppBar.large(
+                    title: Text("${widget.username} 的主题"),
+                    backgroundColor:
+                        (wallpaperPath != null && transparentBarsEnabled.value)
+                        ? Colors.transparent
+                        : null,
+                    actions: [
+                      if (widget.avatarUrl != null &&
+                          widget.avatarUrl!.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.all(12.0),
+                          child: CircleAvatar(
+                            backgroundImage: NetworkImage(widget.avatarUrl!),
+                          ),
+                        ),
+                    ],
+                  ),
+
+                  if (_isFirstLoading)
+                    const SliverToBoxAdapter(child: LinearProgressIndicator()),
+
+                  if (_threads.isEmpty && !_isFirstLoading)
+                    SliverFillRemaining(
+                      child: Center(
+                        child: Text(
+                          _errorMsg.isNotEmpty ? _errorMsg : "没有找到公开的主题",
+                        ),
+                      ),
+                    ),
+
+                  SliverList(
+                    delegate: SliverChildBuilderDelegate(
+                      (context, index) {
+                        if (index == _threads.length) return _buildFooter();
+                        final item = _threads[index];
+                        return _buildThreadTile(item);
+                      },
+                      childCount: _threads.length + 1, // +1 给 footer
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(
+                height: 0,
+                width: 0,
+                child: WebViewWidget(controller: _hiddenController),
               ),
             ],
           ),
-          SizedBox(
-            height: 0,
-            width: 0,
-            child: WebViewWidget(controller: _hiddenController),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -294,91 +337,111 @@ class _UserDetailPageState extends State<UserDetailPage> {
   }
 
   Widget _buildThreadTile(UserThreadItem item) {
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      elevation: 0,
-      color: Theme.of(context).cardColor,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) =>
-                  ThreadDetailPage(tid: item.tid, subject: item.subject),
-            ),
-          );
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                item.subject,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 15,
+    return ValueListenableBuilder<String?>(
+      valueListenable: customWallpaperPath,
+      builder: (context, wallpaperPath, _) {
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          elevation: 0,
+          color: wallpaperPath != null
+              ? Theme.of(context).cardColor.withOpacity(0.7)
+              : Theme.of(context).cardColor,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) =>
+                      ThreadDetailPage(tid: item.tid, subject: item.subject),
                 ),
-              ),
-              const SizedBox(height: 8),
-              Row(
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 2,
+                  Text(
+                    item.subject,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
                     ),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.secondaryContainer,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      item.forumName,
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.onSecondaryContainer,
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.secondaryContainer,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          item.forumName,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSecondaryContainer,
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    item.dateline,
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
-                  const Spacer(),
-                  const Icon(
-                    Icons.remove_red_eye,
-                    size: 12,
-                    color: Colors.grey,
-                  ),
-                  const SizedBox(width: 2),
-                  Text(
-                    item.views,
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
-                  const SizedBox(width: 8),
-                  const Icon(
-                    Icons.chat_bubble_outline,
-                    size: 14,
-                    color: Colors.grey,
-                  ),
-                  const SizedBox(width: 2),
-                  Text(
-                    item.replies,
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                      const SizedBox(width: 8),
+                      Text(
+                        item.dateline,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                        ),
+                      ),
+                      const Spacer(),
+                      const Icon(
+                        Icons.remove_red_eye,
+                        size: 12,
+                        color: Colors.grey,
+                      ),
+                      const SizedBox(width: 2),
+                      Text(
+                        item.views,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      const Icon(
+                        Icons.chat_bubble_outline,
+                        size: 14,
+                        color: Colors.grey,
+                      ),
+                      const SizedBox(width: 2),
+                      Text(
+                        item.replies,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }

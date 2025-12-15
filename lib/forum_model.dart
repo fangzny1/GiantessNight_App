@@ -147,7 +147,5 @@ final globalImageCache = CacheManager(
     'gn_forum_imageCache_v2', // 换个名字，避免和旧的冲突
     stalePeriod: const Duration(days: 7),
     maxNrOfCacheObjects: 1000,
-    repo: JsonCacheInfoRepository(databaseName: 'gn_forum_imageCache_v2'),
-    fileService: HttpFileService(),
   ),
 );
