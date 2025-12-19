@@ -163,6 +163,11 @@ class _ThreadListPageState extends State<ThreadListPage> {
         }
         _parseHtmlData(realHtml);
       }
+
+      if (mounted)
+        setState(() {
+          _isFirstLoading = false;
+        });
     } catch (e) {
       if (mounted)
         setState(() {

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:async';
 import 'dart:convert';
+import 'package:dio/dio.dart'; // Add Dio import
 import 'login_page.dart';
 import 'forum_model.dart';
 import 'thread_list_page.dart';
@@ -29,6 +31,8 @@ final ValueNotifier<ThemeMode> currentTheme = ValueNotifier(ThemeMode.system);
 // 【新增】自定义壁纸路径
 final ValueNotifier<String?> customWallpaperPath = ValueNotifier(null);
 final ValueNotifier<bool> transparentBarsEnabled = ValueNotifier(false);
+// 【新增】加载模式开关：true = Dio代理加载 (强力模式), false = WebView原生加载 (默认)
+final ValueNotifier<bool> useDioProxyLoader = ValueNotifier(false);
 
 final GlobalKey<_ForumHomePageState> forumKey = GlobalKey();
 
@@ -44,6 +48,8 @@ void main() async {
   // 【新增】加载壁纸路径
   customWallpaperPath.value = prefs.getString('custom_wallpaper');
   transparentBarsEnabled.value = prefs.getBool('transparent_bars') ?? false;
+  // 【新增】读取设置
+  useDioProxyLoader.value = prefs.getBool('use_dio_proxy') ?? false;
 
   String? themeStr = prefs.getString('theme_mode');
   if (themeStr == 'dark')
@@ -223,11 +229,23 @@ class _ForumHomePageState extends State<ForumHomePage> {
   Map<String, Forum> _forumsMap = {};
   bool _isLoading = true;
   WebViewController? _hiddenController;
+  Timer? _timeoutTimer;
 
   @override
   void initState() {
     super.initState();
     _initHiddenWebView();
+  }
+
+  @override
+  void dispose() {
+    _timeoutTimer?.cancel();
+    super.dispose();
+  }
+
+  void _forceRetry() {
+    print("💪 用户手动触发强力加载");
+    _fetchData();
   }
 
   // 【修复点】这就是之前报错缺失的方法，现在补上了
@@ -330,9 +348,35 @@ class _ForumHomePageState extends State<ForumHomePage> {
   // ==========================================
   void _fetchData() async {
     if (!mounted) return;
+
+    // 重置定时器和SnackBar
+    _timeoutTimer?.cancel();
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+
     setState(() {
       _isLoading = true;
     });
+
+    // 启动超时检测
+    _timeoutTimer = Timer(const Duration(seconds: 15), () {
+      if (mounted && _isLoading) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text("加载超时，请尝试强力加载"),
+            duration: const Duration(seconds: 30),
+            action: SnackBarAction(label: "强力加载", onPressed: _forceRetry),
+          ),
+        );
+      }
+    });
+
+    // 【新增】如果开启了强力模式，优先用 Dio 请求主页
+    if (useDioProxyLoader.value) {
+      print("⚡️ [DioProxy] 尝试加载主页 API...");
+      bool success = await _fetchDataByDio();
+      // 注意：如果 Dio 成功了，就不需要再跑下面的 loadRequest 了
+      if (success) return;
+    }
 
     // 【新增】每次刷新前清理 WebView 缓存，确保 Cookie 状态重置
     // 这样能解决"第一次行第二次不行"的问题
@@ -348,6 +392,174 @@ class _ForumHomePageState extends State<ForumHomePage> {
     _hiddenController?.loadRequest(
       Uri.parse('https://www.giantessnight.com/gnforum2012/forum.php?mobile=2'),
     );
+  }
+
+  // ==========================================
+  // 2.5 Dio 强力加载主页 (API)
+  // ==========================================
+  // 【修复版】Dio 快速请求 + Cookie 自动更新
+  Future<bool> _fetchDataByDio() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      String cookie = prefs.getString('saved_cookie_string') ?? "";
+
+      if (cookie.isEmpty) return false;
+
+      final dio = Dio();
+      dio.options.headers['Cookie'] = cookie;
+      dio.options.headers['User-Agent'] = kUserAgent;
+      dio.options.connectTimeout = const Duration(seconds: 15); // 稍微长一点
+
+      final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
+      final String url =
+          'https://www.giantessnight.com/gnforum2012/api/mobile/index.php?version=4&module=forumindex&t=$timestamp';
+
+      final response = await dio.get<String>(url);
+
+      // 【核心修复】检查服务器是否发了新 Cookie，如果有，赶紧存起来！
+      // 这一步能让 Dio 模式具备“自我续命”的能力
+      List<String>? newCookies = response.headers['set-cookie'];
+      if (newCookies != null && newCookies.isNotEmpty) {
+        String combinedCookie = newCookies
+            .map((c) => c.split(';')[0])
+            .join('; ');
+        // 简单的合并策略：把新的追加到旧的后面，或者替换同名 key
+        // 为了简单有效，我们这里直接更新 saved_cookie_string
+        // 注意：这里最好做一个更复杂的 CookieJar 管理，但简单追加通常也能工作
+        // 更稳妥的方式是：如果返回了 auth 或 saltkey，就替换本地存的
+        if (combinedCookie.contains('auth') ||
+            combinedCookie.contains('saltkey')) {
+          print("💾 [DioProxy] 捕获到新 Cookie，正在更新本地存储...");
+          await prefs.setString('saved_cookie_string', combinedCookie);
+          // 同时同步给 WebView (为了无缝切换)
+          final cookieMgr = WebViewCookieManager();
+          // ... (简单的 setCookie 逻辑，或者直接忽略，让 WebView 自己去跑)
+        }
+      }
+
+      if (response.statusCode == 200 && response.data != null) {
+        String jsonStr = response.data!;
+        // ... (数据清洗逻辑保持不变)
+        if (jsonStr.startsWith('"') && jsonStr.endsWith('"')) {
+          jsonStr = jsonStr
+              .substring(1, jsonStr.length - 1)
+              .replaceAll('\\"', '"')
+              .replaceAll('\\\\', '\\');
+        }
+
+        // 检查是否掉登录
+        if (jsonStr.contains('"error":"to_login"') ||
+            jsonStr.contains('messageval":"to_login')) {
+          print("💨 [DioProxy] 发现 Cookie 已失效，放弃 Dio，转交 WebView 重试");
+          return false; // 返回 false，让后面的 WebView 逻辑接手去刷新 Cookie
+        }
+
+        print("✅ [DioProxy] 主页数据获取成功");
+        _processData(jsonDecode(jsonStr));
+        return true;
+      }
+    } catch (e) {
+      print("❌ [DioProxy] 主页加载失败: $e");
+    }
+    return false;
+  }
+
+  // 抽取出的数据处理逻辑
+  void _processData(dynamic data) async {
+    // 处理 to_login 错误 (Cookie 失效)
+    if (data['error'] == 'to_login' ||
+        (data['Message'] != null &&
+            data['Message']['messageval'] == 'to_login')) {
+      print("⚠️ 检测到 Cookie 失效或需要登录");
+      if (mounted) {
+        _timeoutTimer?.cancel();
+        setState(() {
+          _isLoading = false;
+        });
+      }
+      return;
+    }
+
+    if (data['Variables'] == null) {
+      print("⚠️ 数据解析异常: 缺少 Variables 字段");
+      if (mounted) {
+        _timeoutTimer?.cancel();
+        setState(() {
+          _isLoading = false;
+        });
+      }
+      return;
+    }
+
+    // === 开始解析 Variables ===
+    var variables = data['Variables'];
+
+    // 1. 更新用户信息
+    String newName = variables['member_username'].toString();
+    String newUid = variables['member_uid'].toString();
+    final prefs = await SharedPreferences.getInstance();
+
+    if (newName.isNotEmpty) {
+      if (newName != currentUser.value) {
+        currentUser.value = newName;
+        await prefs.setString('username', newName);
+      }
+
+      if (newUid.isNotEmpty && newUid != "0") {
+        if (newUid != currentUserUid.value) {
+          currentUserUid.value = newUid;
+          await prefs.setString('uid', newUid);
+        }
+        String avatarUrl =
+            "https://www.giantessnight.com/gnforum2012/uc_server/avatar.php?uid=$newUid&size=middle";
+        if (currentUserAvatar.value != avatarUrl) {
+          currentUserAvatar.value = avatarUrl;
+          await prefs.setString('avatar', avatarUrl);
+        }
+      }
+    }
+
+    // 2. 解析分区 (catlist)
+    List<Category> tempCats = [];
+    var rawCatList = variables['catlist'];
+    if (rawCatList != null) {
+      if (rawCatList is List) {
+        tempCats = rawCatList.map((e) => Category.fromJson(e)).toList();
+      } else if (rawCatList is Map) {
+        rawCatList.forEach((k, v) {
+          tempCats.add(Category.fromJson(v));
+        });
+      }
+    }
+
+    // 3. 解析板块 (forumlist)
+    Map<String, Forum> tempForumMap = {};
+    var rawForumList = variables['forumlist'];
+    if (rawForumList != null) {
+      if (rawForumList is List) {
+        for (var f in rawForumList) {
+          var forum = Forum.fromJson(f);
+          tempForumMap[forum.fid] = forum;
+        }
+      } else if (rawForumList is Map) {
+        rawForumList.forEach((k, v) {
+          var forum = Forum.fromJson(v);
+          tempForumMap[forum.fid] = forum;
+        });
+      }
+    }
+
+    print("✅ 解析成功: 获取到 ${tempCats.length} 个分区, ${tempForumMap.length} 个板块");
+
+    if (mounted) {
+      _timeoutTimer?.cancel();
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      setState(() {
+        _categories = tempCats;
+        _forumsMap = tempForumMap;
+        _isLoading = false;
+      });
+    }
   }
 
   // ==========================================
@@ -378,115 +590,24 @@ class _ForumHomePageState extends State<ForumHomePage> {
         data = jsonDecode(jsonString);
       } catch (e) {
         print("❌ JSON 格式错误，服务器返回的可能不是数据");
-        if (mounted)
+        if (mounted) {
+          _timeoutTimer?.cancel();
           setState(() {
             _isLoading = false;
           });
+        }
         return;
       }
 
-      // 处理 to_login 错误 (Cookie 失效)
-      if (data['error'] == 'to_login' ||
-          (data['Message'] != null &&
-              data['Message']['messageval'] == 'to_login')) {
-        print("⚠️ 检测到 Cookie 失效或需要登录");
-        // 这里可以选择清理本地缓存，或者只是停止加载
-        if (mounted)
-          setState(() {
-            _isLoading = false;
-          });
-        return;
-      }
-
-      if (data['Variables'] == null) {
-        print("⚠️ 数据解析异常: 缺少 Variables 字段");
-        if (mounted)
-          setState(() {
-            _isLoading = false;
-          });
-        return;
-      }
-
-      // === 开始解析 Variables ===
-      var variables = data['Variables'];
-
-      // 1. 更新用户信息
-      String newName = variables['member_username'].toString();
-      String newUid = variables['member_uid'].toString();
-      final prefs = await SharedPreferences.getInstance();
-
-      // 只要服务器返回了有效的用户名，就更新状态
-      if (newName.isNotEmpty) {
-        if (newName != currentUser.value) {
-          currentUser.value = newName;
-          await prefs.setString('username', newName);
-        }
-
-        // 独立更新 UID 和头像 (不依赖用户名是否变化)
-        if (newUid.isNotEmpty && newUid != "0") {
-          if (newUid != currentUserUid.value) {
-            currentUserUid.value = newUid;
-            await prefs.setString('uid', newUid);
-          }
-
-          String avatarUrl =
-              "https://www.giantessnight.com/gnforum2012/uc_server/avatar.php?uid=$newUid&size=middle";
-
-          // 确保头像 URL 被设置 (即使用户名没变)
-          if (currentUserAvatar.value != avatarUrl) {
-            currentUserAvatar.value = avatarUrl;
-            await prefs.setString('avatar', avatarUrl);
-          }
-        }
-      }
-
-      // 2. 解析分区 (catlist) - 兼容 List 和 Map
-      List<Category> tempCats = [];
-      var rawCatList = variables['catlist'];
-
-      if (rawCatList != null) {
-        if (rawCatList is List) {
-          tempCats = rawCatList.map((e) => Category.fromJson(e)).toList();
-        } else if (rawCatList is Map) {
-          rawCatList.forEach((k, v) {
-            tempCats.add(Category.fromJson(v));
-          });
-        }
-      }
-
-      // 3. 解析板块 (forumlist) - 兼容 List 和 Map
-      Map<String, Forum> tempForumMap = {};
-      var rawForumList = variables['forumlist'];
-
-      if (rawForumList != null) {
-        if (rawForumList is List) {
-          for (var f in rawForumList) {
-            var forum = Forum.fromJson(f);
-            tempForumMap[forum.fid] = forum;
-          }
-        } else if (rawForumList is Map) {
-          rawForumList.forEach((k, v) {
-            var forum = Forum.fromJson(v);
-            tempForumMap[forum.fid] = forum;
-          });
-        }
-      }
-
-      print("✅ 解析成功: 获取到 ${tempCats.length} 个分区, ${tempForumMap.length} 个板块");
-
-      if (mounted) {
-        setState(() {
-          _categories = tempCats;
-          _forumsMap = tempForumMap;
-          _isLoading = false;
-        });
-      }
+      _processData(data); // Reuse the logic
     } catch (e) {
       print("❌ 解析过程报错: $e");
-      if (mounted)
+      if (mounted) {
+        _timeoutTimer?.cancel();
         setState(() {
           _isLoading = false;
         });
+      }
     }
   }
 
@@ -1206,6 +1327,26 @@ class _ProfilePageState extends State<ProfilePage> {
                 // 【修改】点击不再直接清理，而是弹窗询问
                 onTap: () => _showClearCacheDialog(context),
               ),
+
+              // 【新增】加载模式入口
+              ListTile(
+                leading: const Icon(
+                  Icons.settings_ethernet,
+                  color: Colors.deepPurple,
+                ),
+                title: const Text("加载模式设置"),
+                subtitle: ValueListenableBuilder<bool>(
+                  valueListenable: useDioProxyLoader,
+                  builder: (context, value, _) {
+                    return Text(
+                      value ? "当前: 强力代理模式 (Dio)" : "当前: 原生模式 (WebView)",
+                    );
+                  },
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                // onTap: () => _showLoadModeDialog(context),
+              ),
+
               const Divider(),
 
               // 【新增】外观设置

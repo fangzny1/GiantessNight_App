@@ -17,6 +17,7 @@ import 'login_page.dart';
 import 'user_detail_page.dart';
 import 'forum_model.dart';
 import 'reply_native_page.dart'; // 引入原生回复页面
+import 'main.dart'; // Import main.dart for global variables
 
 // Helper function for cleaning HTML (moved from class)
 String _cleanHtml(String raw) {
@@ -505,17 +506,14 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
 
   // 修改加载逻辑
   void _loadPage(int page, {bool resetScroll = false}) async {
-    // 如果是翻页，先清空当前列表，避免视觉混淆 (也可选择不清空，看需求)
-    // 这里选择不清空，而是显示全屏 loading，或者在 parse 后替换
-    // 但为了解决“拼接”问题，我们需要确保数据是替换的
-
     _targetPage = page;
+
+    // UI 状态更新
     if (mounted) {
       setState(() {
         _isLoading = true;
-        // _posts = []; // 不再清空，只在第一次加载时清空
-        // _pidKeys.clear();
-        // _floorKeys.clear();
+        // 注意：这里不要清空 _posts，否则翻页时会闪烁
+        // 除非是跳转跨度很大
       });
     }
 
@@ -523,7 +521,7 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
       _scrollController.jumpTo(0);
     }
 
-    // 构造 URL
+    // 构造 URL (强制使用电脑版 mobile=no 以便解析)
     String url =
         '${_baseUrl}forum.php?mod=viewthread&tid=${widget.tid}&mobile=no';
     if (_isOnlyLandlord && _landlordUid != null) {
@@ -531,66 +529,99 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
     }
     url += '&page=$page';
 
-    // 1. 尝试读取缓存 (极速加载)
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final cacheKey =
-          'thread_cache_${widget.tid}_${page}_${_isOnlyLandlord ? "landlord" : "all"}';
-      final cachedHtml = prefs.getString(cacheKey);
+    print("🚀 加载帖子(第$page页): $url");
 
-      if (cachedHtml != null && cachedHtml.isNotEmpty) {
-        // 如果有缓存，立即解析并显示 (优化首屏速度)
-        if (mounted) {
-          _parseHtmlData(cachedHtml);
+    // ============================================================
+    // 【核心修复】强力模式：Dio 下载 -> 校验 -> 注入 WebView
+    // ============================================================
+    if (useDioProxyLoader.value) {
+      print("⚡️ [DioProxy] 详情页正在通过 Dio 下载 HTML...");
+      try {
+        final dio = Dio();
+        dio.options.headers['Cookie'] = _userCookies;
+        dio.options.headers['User-Agent'] = kUserAgent;
+        dio.options.connectTimeout = const Duration(seconds: 15);
+        dio.options.receiveTimeout = const Duration(seconds: 15);
+
+        final response = await dio.get<String>(url);
+
+        // 【新增】保存新 Cookie
+        List<String>? newCookies = response.headers['set-cookie'];
+        if (newCookies != null && newCookies.isNotEmpty) {
+          String combined = newCookies.map((c) => c.split(';')[0]).join('; ');
+          if (combined.contains('auth')) {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('saved_cookie_string', combined);
+          }
         }
-      }
-    } catch (e) {
-      // 忽略缓存读取错误
-    }
 
-    // 2. 尝试使用 Dio 请求 (跳过 WebView 渲染，速度快且节省流量)
-    bool useWebViewFallback = true;
-    try {
-      final dio = Dio();
-      dio.options.headers['Cookie'] = _userCookies;
-      dio.options.headers['User-Agent'] = kUserAgent;
-      // 设置超时
-      dio.options.connectTimeout = const Duration(seconds: 10);
-      dio.options.receiveTimeout = const Duration(seconds: 15);
+        if (response.statusCode == 200 && response.data != null) {
+          String html = response.data!;
 
-      // 请求 HTML
-      final response = await dio.get<String>(url);
+          // --- 【新增：安检门】 ---
+          // 检查 HTML 是否包含关键内容，防止"假成功"
+          // 1. 检查是否变成了登录页
+          if (html.contains('action=login') &&
+              !html.contains('id="postlist"')) {
+            print("💨 [DioProxy] 抓取到了登录页，Cookie 可能失效");
+            throw Exception("Session expired"); // 抛出异常，触发 catch，降级回 WebView
+          }
 
-      if (response.statusCode == 200 && response.data != null) {
-        String html = response.data!;
-        // 简单校验是否是有效的帖子页面
-        if (html.contains('id="postlist"') || html.contains('class="pl"')) {
-          // 更新缓存
+          // 2. 检查是否包含帖子列表容器
+          // 正常的帖子页面一定有 id="postlist" 或 class="pl"
+          if (!html.contains('id="postlist"') && !html.contains('class="pl"')) {
+            print("💨 [DioProxy] 抓取内容异常（可能是WAF验证页），降级处理");
+            throw Exception("Invalid content");
+          }
+          // -----------------------
+
+          // 如果通过安检，再注入
+          _hiddenController?.loadHtmlString(html, baseUrl: url);
+
+          // 2. 直接调用解析逻辑 (不等待 WebView 的 onPageFinished)
+          // 这样速度最快，且绕过了 WebView 的网络层
+          _parseHtmlData(html);
+
+          // 保存缓存 (Dio 模式单独保存，避免与 WebView 模式重复)
           final prefs = await SharedPreferences.getInstance();
           final cacheKey =
               'thread_cache_${widget.tid}_${page}_${_isOnlyLandlord ? "landlord" : "all"}';
           await prefs.setString(cacheKey, html);
 
-          // 解析数据
-          if (mounted) {
-            _parseHtmlData(html);
-          }
-          useWebViewFallback = false; // 成功拿到数据，不需要 WebView
+          print("✅ [DioProxy] 详情页 HTML 下载并注入成功");
+          return; // 成功后直接退出，不走下面的 loadRequest
+        }
+      } catch (e) {
+        print("❌ [DioProxy] 加载失败/校验未通过: $e");
+        print("🔄 自动降级：尝试使用 WebView 原生加载...");
+        if (mounted) {
+          // 可选：给个小提示
+          // ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("强力加载失败，尝试原生重试..."), duration: Duration(milliseconds: 500)));
         }
       }
-    } catch (e) {
-      // print("Dio request failed or blocked: $e. Fallback to WebView.");
     }
 
-    // 3. 降级方案：使用 WebView (处理 Cloudflare、复杂 JS 或 Dio 失败的情况)
-    if (useWebViewFallback && mounted) {
-      // 【关键】使用 ?. 操作符，如果 controller 还没初始化就不执行
-      // 配合 headers 注入 Cookie
-      _hiddenController?.loadRequest(
-        Uri.parse(url),
-        headers: {'Cookie': _userCookies, 'User-Agent': kUserAgent},
-      );
-    }
+    // ============================================================
+    // 原生模式 (默认)：WebView 直接加载
+    // ============================================================
+
+    // 尝试读取缓存 (极速加载) - 仅在原生模式或 Dio 失败后尝试
+    // (逻辑保持你原来的不变，略...)
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cacheKey =
+          'thread_cache_${widget.tid}_${page}_${_isOnlyLandlord ? "landlord" : "all"}';
+      final cachedHtml = prefs.getString(cacheKey);
+      if (cachedHtml != null && cachedHtml.isNotEmpty) {
+        if (mounted) _parseHtmlData(cachedHtml);
+      }
+    } catch (e) {}
+
+    // WebView 发起请求
+    _hiddenController?.loadRequest(
+      Uri.parse(url),
+      headers: {'Cookie': _userCookies, 'User-Agent': kUserAgent},
+    );
   }
 
   Future<void> _loadLocalCookie() async {
@@ -1177,7 +1208,10 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
           final prefs = await SharedPreferences.getInstance();
           final cacheKey =
               'thread_cache_${widget.tid}_${_targetPage}_${_isOnlyLandlord ? "landlord" : "all"}';
-          await prefs.setString(cacheKey, rawHtml);
+          // 只有当 inputHtml 为空 (即 WebView 模式) 时才在这里保存，Dio 模式已经在 _loadPage 里保存过了
+          if (inputHtml == null) {
+            await prefs.setString(cacheKey, rawHtml);
+          }
         } catch (e) {
           // 缓存保存失败忽略
         }
@@ -2308,7 +2342,38 @@ class _ThreadDetailPageState extends State<ThreadDetailPage>
 
   Widget _buildReaderSliver() {
     if (_posts.isEmpty) {
-      return const SliverFillRemaining(child: Center(child: Text("加载中...")));
+      if (_isLoading) {
+        return const SliverFillRemaining(child: Center(child: Text("加载中...")));
+      } else {
+        // 【新增】阅读模式下的空数据兜底
+        return SliverFillRemaining(
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.error_outline,
+                  size: 48,
+                  color: _readerTextColor.withValues(alpha: 0.5),
+                ),
+                const SizedBox(height: 16),
+                Text("未获取到内容", style: TextStyle(color: _readerTextColor)),
+                const SizedBox(height: 24),
+                TextButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      _isLoading = true;
+                    });
+                    _loadPage(_targetPage);
+                  },
+                  icon: Icon(Icons.refresh, color: _readerTextColor),
+                  label: Text("重试", style: TextStyle(color: _readerTextColor)),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
     }
 
     bool showPrevBtn = _targetPage > 1;
