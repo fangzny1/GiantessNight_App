@@ -160,12 +160,20 @@ class CacheHelper {
       final keys = prefs.getKeys();
       int count = 0;
       for (String key in keys) {
+        // 1. 清理帖子详情缓存
         if (key.startsWith('thread_cache_')) {
           await prefs.remove(key);
           count++;
         }
+        // 2. 【新增】清理主页列表缓存
+        else if (key == 'home_page_cache') {
+          await prefs.remove(key);
+          count++;
+        }
+        // 3. 【新增】清理自动保存的阅读背景设置 (可选，看你想不想重置设置)
+        // if (key == 'reader_bg_color') await prefs.remove(key);
       }
-      print("  🧹 已清除 $count 条帖子缓存记录");
+      print("  🧹 已清除 $count 条帖子/主页缓存记录");
       return count;
     } catch (e) {
       print("  ⚠️ 帖子缓存清理失败: $e");

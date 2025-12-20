@@ -48,3 +48,6 @@
 **/ios/ServiceDefinitions.json
 **/ios/Runner/GeneratedPluginRegistrant.*
 **/ios/Pods/
+*.apk
+*.html
+*_files/

@@ -17,8 +17,6 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:cached_network_image/cached_network_image.dart'; // 引入缓存图片库
 import 'cache_helper.dart'; // 引入缓存助手
-import 'package:flutter_cache_manager/flutter_cache_manager.dart'; // 引入缓存管理
-import 'package:permission_handler/permission_handler.dart'; // 引入权限管理
 
 // 全局状态
 final ValueNotifier<String> currentUser = ValueNotifier("未登录");
@@ -72,6 +70,40 @@ void main() async {
   }
 
   runApp(const MyApp());
+}
+
+// 【新增】辅助函数：安全合并 Cookie 字符串
+String _safeMergeCookies(String currentCookie, List<String> newCookieHeaders) {
+  final Map<String, String> finalKv = {};
+
+  // 1. 解析当前已有的 Cookie (旧的，如：auth=xxx; cdb_ref=yyy)
+  void parseAndAdd(String raw) {
+    for (final part in raw.split(';')) {
+      final trimmed = part.trim();
+      if (trimmed.isEmpty || !trimmed.contains('=')) continue;
+      final eq = trimmed.indexOf('=');
+      final k = trimmed.substring(0, eq).trim();
+      final v = trimmed.substring(eq + 1).trim();
+      if (k.isNotEmpty &&
+          !k.toLowerCase().contains('path') &&
+          !k.toLowerCase().contains('domain')) {
+        finalKv[k] = v;
+      }
+    }
+  }
+
+  // 2. 将旧 Cookie 存入 Map
+  parseAndAdd(currentCookie);
+
+  // 3. 将新的 Set-Cookie Header 存入 Map (新值覆盖旧值)
+  for (final header in newCookieHeaders) {
+    // Set-Cookie 头部包含 Path/Expires 等信息，我们只取 key=value 部分
+    String cookiePart = header.split(';')[0];
+    parseAndAdd(cookiePart);
+  }
+
+  // 4. 重新组合成一个新的、干净的 Cookie 字符串
+  return finalKv.entries.map((e) => '${e.key}=${e.value}').join('; ');
 }
 
 // 【新增】定义一个 HttpOverrides 类
@@ -230,6 +262,7 @@ class _ForumHomePageState extends State<ForumHomePage> {
   bool _isLoading = true;
   WebViewController? _hiddenController;
   Timer? _timeoutTimer;
+  bool _apiHttpFallbackTried = false;
 
   @override
   void initState() {
@@ -258,6 +291,9 @@ class _ForumHomePageState extends State<ForumHomePage> {
   // 在 _ForumHomePageState 类中
 
   Future<void> _initHiddenWebView() async {
+    // 0. 【极速优化】先加载缓存数据，让用户这就看到界面
+    _loadCacheData();
+
     // 1. 读取本地 Cookie
     final prefs = await SharedPreferences.getInstance();
     final String savedCookie = prefs.getString('saved_cookie_string') ?? "";
@@ -343,6 +379,26 @@ class _ForumHomePageState extends State<ForumHomePage> {
     _fetchData();
   }
 
+  // 【新增】读取本地缓存数据
+  Future<void> _loadCacheData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? cacheJson = prefs.getString('home_page_cache');
+
+    if (cacheJson != null && _categories.isEmpty) {
+      print("🚀 命中本地缓存，立即渲染！");
+      try {
+        var data = jsonDecode(cacheJson);
+        // 复用 _processData 来解析数据
+        _processData(data);
+        // 注意：_processData 内部会调用 setState，但我们可能还想保持 _isLoading = true
+        // 实际上 _processData 会把 _isLoading 设为 false，这对于"秒开"体验是可以的
+        // 后台的 _fetchData 仍然会继续跑，并在数据回来后再次调用 _processData 刷新界面
+      } catch (e) {
+        print("⚠️ 缓存解析失败: $e");
+      }
+    }
+  }
+
   // ==========================================
   // 2. 初始预热方法
   // ==========================================
@@ -355,6 +411,7 @@ class _ForumHomePageState extends State<ForumHomePage> {
 
     setState(() {
       _isLoading = true;
+      _apiHttpFallbackTried = false;
     });
 
     // 启动超时检测
@@ -370,13 +427,10 @@ class _ForumHomePageState extends State<ForumHomePage> {
       }
     });
 
-    // 【新增】如果开启了强力模式，优先用 Dio 请求主页
-    if (useDioProxyLoader.value) {
-      print("⚡️ [DioProxy] 尝试加载主页 API...");
-      bool success = await _fetchDataByDio();
-      // 注意：如果 Dio 成功了，就不需要再跑下面的 loadRequest 了
-      if (success) return;
-    }
+    // 1. 【新增】Dio 抢跑 (尝试直接请求 API)
+    // 不管有没有开启强力模式，只要有 Cookie，就尝试抢跑
+    // 这样能最大程度利用 API 速度优势
+    _fetchDataByDio();
 
     // 【新增】每次刷新前清理 WebView 缓存，确保 Cookie 状态重置
     // 这样能解决"第一次行第二次不行"的问题
@@ -386,7 +440,7 @@ class _ForumHomePageState extends State<ForumHomePage> {
       // 忽略清理失败
     }
 
-    print("🔄 开始预热 Session (身份统一: 手机版)...");
+    print("🔄 WebView 开始预热...");
 
     // 预热使用 mobile=2，与登录态保持一致
     _hiddenController?.loadRequest(
@@ -401,45 +455,74 @@ class _ForumHomePageState extends State<ForumHomePage> {
   Future<bool> _fetchDataByDio() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      String cookie = prefs.getString('saved_cookie_string') ?? "";
+      String oldCookie = prefs.getString('saved_cookie_string') ?? "";
 
-      if (cookie.isEmpty) return false;
+      print(
+        "🔍 [DioProxy Debug] 初始 Cookie: ${oldCookie.length > 50 ? oldCookie.substring(0, 50) + '...' : oldCookie}",
+      );
+
+      if (oldCookie.isEmpty) {
+        print("🔍 [DioProxy Debug] 没有旧 Cookie，放弃抢跑");
+        return false;
+      }
 
       final dio = Dio();
-      dio.options.headers['Cookie'] = cookie;
+      dio.options.headers['Cookie'] = oldCookie; // 确保带上旧的去请求
       dio.options.headers['User-Agent'] = kUserAgent;
-      dio.options.connectTimeout = const Duration(seconds: 15); // 稍微长一点
+      dio.options.connectTimeout = const Duration(seconds: 30);
+      dio.options.receiveTimeout = const Duration(seconds: 30);
 
       final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-      final String url =
+      final String httpsUrl =
           'https://www.giantessnight.com/gnforum2012/api/mobile/index.php?version=4&module=forumindex&t=$timestamp';
+      final String httpUrl =
+          'http://www.giantessnight.com/gnforum2012/api/mobile/index.php?version=4&module=forumindex&t=$timestamp';
 
-      final response = await dio.get<String>(url);
-
-      // 【核心修复】检查服务器是否发了新 Cookie，如果有，赶紧存起来！
-      // 这一步能让 Dio 模式具备“自我续命”的能力
-      List<String>? newCookies = response.headers['set-cookie'];
-      if (newCookies != null && newCookies.isNotEmpty) {
-        String combinedCookie = newCookies
-            .map((c) => c.split(';')[0])
-            .join('; ');
-        // 简单的合并策略：把新的追加到旧的后面，或者替换同名 key
-        // 为了简单有效，我们这里直接更新 saved_cookie_string
-        // 注意：这里最好做一个更复杂的 CookieJar 管理，但简单追加通常也能工作
-        // 更稳妥的方式是：如果返回了 auth 或 saltkey，就替换本地存的
-        if (combinedCookie.contains('auth') ||
-            combinedCookie.contains('saltkey')) {
-          print("💾 [DioProxy] 捕获到新 Cookie，正在更新本地存储...");
-          await prefs.setString('saved_cookie_string', combinedCookie);
-          // 同时同步给 WebView (为了无缝切换)
-          final cookieMgr = WebViewCookieManager();
-          // ... (简单的 setCookie 逻辑，或者直接忽略，让 WebView 自己去跑)
+      print("🔍 [DioProxy Debug] 请求 URL: $httpsUrl");
+      Response<String> response;
+      try {
+        response = await dio.get<String>(httpsUrl);
+      } on DioException catch (e) {
+        final String msg = e.error?.toString() ?? e.toString();
+        if (msg.contains('HandshakeException')) {
+          print("⚠️ [DioProxy] HTTPS 握手失败，尝试 HTTP...");
+          response = await dio.get<String>(httpUrl);
+        } else {
+          rethrow;
         }
+      }
+
+      print("🔍 [DioProxy Debug] 响应状态码: ${response.statusCode}");
+
+      // 【核心修复】使用新的合并函数
+      List<String>? newCookieHeaders = response.headers['set-cookie'];
+      String? updatedCookie; // 用于重试的新 Cookie
+      if (newCookieHeaders != null && newCookieHeaders.isNotEmpty) {
+        print("🔍 [DioProxy Debug] 服务器返回 Set-Cookie: $newCookieHeaders");
+        // 合并旧 Cookie 和新 Set-Cookie 头部
+        String mergedCookie = _safeMergeCookies(oldCookie, newCookieHeaders);
+        print(
+          "🔍 [DioProxy Debug] 合并后 Cookie: ${mergedCookie.length > 50 ? mergedCookie.substring(0, 50) + '...' : mergedCookie}",
+        );
+
+        // 如果合并后的 Cookie 看起来有效，就存入硬盘
+        if (mergedCookie.contains('auth') || mergedCookie.contains('saltkey')) {
+          await prefs.setString('saved_cookie_string', mergedCookie);
+          print("💾 [DioProxy] Cookie 合并成功，已保存！");
+          updatedCookie = mergedCookie; // 记录下来准备重试
+        }
+      } else {
+        print("🔍 [DioProxy Debug] 服务器没有返回 Set-Cookie");
       }
 
       if (response.statusCode == 200 && response.data != null) {
         String jsonStr = response.data!;
-        // ... (数据清洗逻辑保持不变)
+
+        print(
+          "🔍 [DioProxy Debug] 响应数据片段: ${jsonStr.length > 100 ? jsonStr.substring(0, 100) : jsonStr}...",
+        );
+
+        // 数据清洗
         if (jsonStr.startsWith('"') && jsonStr.endsWith('"')) {
           jsonStr = jsonStr
               .substring(1, jsonStr.length - 1)
@@ -450,16 +533,208 @@ class _ForumHomePageState extends State<ForumHomePage> {
         // 检查是否掉登录
         if (jsonStr.contains('"error":"to_login"') ||
             jsonStr.contains('messageval":"to_login')) {
-          print("💨 [DioProxy] 发现 Cookie 已失效，放弃 Dio，转交 WebView 重试");
-          return false; // 返回 false，让后面的 WebView 逻辑接手去刷新 Cookie
+          print("💨 [DioProxy] Cookie 已失效 (包含 to_login 错误)");
+
+          // 【新增】原地复活重试机制 (API 续命)
+          if (updatedCookie != null && updatedCookie != oldCookie) {
+            print("🔄 [DioProxy] 发现 API 更新了 Cookie，尝试原地复活重试...");
+            dio.options.headers['Cookie'] = updatedCookie;
+            Response<String> retryResponse;
+            try {
+              retryResponse = await dio.get<String>(httpsUrl);
+            } on DioException catch (e) {
+              final String msg = e.error?.toString() ?? e.toString();
+              if (msg.contains('HandshakeException')) {
+                print("⚠️ [DioProxy] HTTPS 握手失败，尝试 HTTP...");
+                retryResponse = await dio.get<String>(httpUrl);
+              } else {
+                rethrow;
+              }
+            }
+
+            if (retryResponse.statusCode == 200 && retryResponse.data != null) {
+              String retryJson = retryResponse.data!;
+              // 再次清洗
+              if (retryJson.startsWith('"') && retryJson.endsWith('"')) {
+                retryJson = retryJson
+                    .substring(1, retryJson.length - 1)
+                    .replaceAll('\\"', '"')
+                    .replaceAll('\\\\', '\\');
+              }
+
+              if (!retryJson.contains('"error":"to_login"') &&
+                  !retryJson.contains('messageval":"to_login')) {
+                print("✅ [DioProxy] 原地复活成功 (API 续命)！");
+                await prefs.setString('home_page_cache', retryJson);
+                _processData(jsonDecode(retryJson));
+                return true;
+              } else {
+                print("❌ [DioProxy] 原地复活失败 (API 没给 Auth)");
+              }
+            }
+          }
+
+          // 【新增】Web 页面模拟续命 (终极杀招)
+          // 既然 API 不给 Auth，那就模拟浏览器去访问 forum.php，强行让服务器刷新 Auth
+          print("🔄 [DioProxy] 尝试模拟浏览器访问 forum.php 以刷新 Auth...");
+          try {
+            // 策略调整：优先使用旧的 Cookie 尝试（因为 API 给的新 Saltkey 可能有毒）
+            // 如果旧的也失效，那反正都是失效，没区别
+            String currentBestCookie = oldCookie;
+
+            // 模拟更真实的浏览器 Header
+            dio.options.headers['Cookie'] = currentBestCookie;
+            dio.options.headers['Accept'] =
+                'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8';
+            dio.options.headers['Accept-Language'] = 'zh-CN,zh;q=0.9,en;q=0.8';
+            dio.options.headers['Referer'] =
+                'https://www.giantessnight.com/gnforum2012/forum.php?mobile=2';
+
+            // 【关键】禁止自动重定向！
+            // 这样我们能看到 forum.php 的 302 响应，以及它携带的 Set-Cookie
+            // 否则 Dio 会自动跳转到登录页，我们看到的 Set-Cookie 就变成了登录页的（lastact=logging）
+            dio.options.followRedirects = false;
+            dio.options.validateStatus = (status) =>
+                status != null && status < 500;
+
+            // 请求 forum.php
+            Response<String> forumResp = await dio.get<String>(
+              'https://www.giantessnight.com/gnforum2012/forum.php?mobile=2',
+            );
+
+            print("🔍 [DioProxy Debug] forum.php 响应码: ${forumResp.statusCode}");
+
+            final List<String>? forumCookies = forumResp.headers['set-cookie'];
+            if (forumCookies != null && forumCookies.isNotEmpty) {
+              currentBestCookie = _safeMergeCookies(
+                currentBestCookie,
+                forumCookies,
+              );
+            }
+
+            final int? statusCode = forumResp.statusCode;
+            final String? location = forumResp.headers.value('location');
+            if ((statusCode == 301 || statusCode == 302) &&
+                location != null &&
+                location.isNotEmpty) {
+              Uri redirectUri = Uri.parse(location);
+              if (!location.startsWith('http')) {
+                if (location.startsWith('/')) {
+                  redirectUri = Uri.parse(
+                    'https://www.giantessnight.com$location',
+                  );
+                } else {
+                  redirectUri = Uri.parse(
+                    'https://www.giantessnight.com/gnforum2012/$location',
+                  );
+                }
+              }
+
+              dio.options.headers['Cookie'] = currentBestCookie;
+              dio.options.headers['Referer'] =
+                  'https://www.giantessnight.com/gnforum2012/forum.php?mobile=2';
+
+              final Response<String> redirectResp = await dio.get<String>(
+                redirectUri.toString(),
+              );
+              final List<String>? redirectCookies =
+                  redirectResp.headers['set-cookie'];
+              if (redirectCookies != null && redirectCookies.isNotEmpty) {
+                currentBestCookie = _safeMergeCookies(
+                  currentBestCookie,
+                  redirectCookies,
+                );
+              }
+            }
+
+            final String forumMergedCookie = currentBestCookie;
+
+            bool gotNewAuth = false;
+            if (forumMergedCookie.contains('auth=') ||
+                forumMergedCookie.contains('_auth=')) {
+              final parts = forumMergedCookie.split(';');
+              for (final p in parts) {
+                final kv = p.trim().split('=');
+                if (kv.length >= 2) {
+                  final key = kv[0].toLowerCase();
+                  final val = kv[1];
+                  if ((key.endsWith('auth') || key.endsWith('_auth')) &&
+                      val.length > 5 &&
+                      val != 'deleted') {
+                    gotNewAuth = true;
+                    break;
+                  }
+                }
+              }
+            }
+
+            if (gotNewAuth) {
+              print("✅ [DioProxy] 检查到有效 Auth 存在");
+            } else {
+              print("⚠️ [DioProxy] 警告: 合并后的 Cookie 中未发现有效 Auth 字段");
+            }
+
+            await prefs.setString('saved_cookie_string', forumMergedCookie);
+
+            dio.options.followRedirects = true;
+            dio.options.headers['Cookie'] = forumMergedCookie;
+            dio.options.headers.remove('Accept');
+            dio.options.headers.remove('Accept-Language');
+            dio.options.headers['Referer'] =
+                'https://www.giantessnight.com/gnforum2012/forum.php?mobile=2';
+
+            Response<String> finalRetry;
+            try {
+              finalRetry = await dio.get<String>(httpsUrl);
+            } on DioException catch (e) {
+              final String msg = e.error?.toString() ?? e.toString();
+              if (msg.contains('HandshakeException')) {
+                print("⚠️ [DioProxy] HTTPS 握手失败，尝试 HTTP...");
+                finalRetry = await dio.get<String>(httpUrl);
+              } else {
+                rethrow;
+              }
+            }
+            if (finalRetry.statusCode == 200 && finalRetry.data != null) {
+              String finalJson = finalRetry.data!;
+              if (finalJson.startsWith('"') && finalJson.endsWith('"')) {
+                finalJson = finalJson
+                    .substring(1, finalJson.length - 1)
+                    .replaceAll('\\"', '"')
+                    .replaceAll('\\\\', '\\');
+              }
+
+              if (!finalJson.contains('"error":"to_login"') &&
+                  !finalJson.contains('messageval":"to_login')) {
+                print("⚡️ [DioProxy] 最终抢跑成功！(Web模拟生效)");
+                await prefs.setString('home_page_cache', finalJson);
+                _processData(jsonDecode(finalJson));
+                return true;
+              } else {
+                print(
+                  "❌ [DioProxy] 最终重试依然失败。Server Response: ${finalJson.length > 50 ? finalJson.substring(0, 50) : finalJson}...",
+                );
+              }
+            }
+          } catch (e) {
+            print("❌ [DioProxy] 模拟浏览器续命失败: $e");
+          }
+
+          print("💨 [DioProxy] 最终放弃，转交 WebView");
+          return false;
         }
 
-        print("✅ [DioProxy] 主页数据获取成功");
-        _processData(jsonDecode(jsonStr));
+        print("✅ [DioProxy] 抢跑成功！");
+        // 保存缓存
+        await prefs.setString('home_page_cache', jsonStr);
+
+        // 解析数据
+        var data = jsonDecode(jsonStr);
+        _processData(data);
         return true;
       }
     } catch (e) {
-      print("❌ [DioProxy] 主页加载失败: $e");
+      print("❌ [DioProxy] 抢跑失败: $e");
     }
     return false;
   }
@@ -498,6 +773,21 @@ class _ForumHomePageState extends State<ForumHomePage> {
     String newName = variables['member_username'].toString();
     String newUid = variables['member_uid'].toString();
     final prefs = await SharedPreferences.getInstance();
+
+    final String cookiePre = variables['cookiepre']?.toString() ?? '';
+    final String apiAuth = variables['auth']?.toString() ?? '';
+    final String apiSaltkey = variables['saltkey']?.toString() ?? '';
+    if (cookiePre.isNotEmpty && (apiAuth.isNotEmpty || apiSaltkey.isNotEmpty)) {
+      final List<String> kvCookies = [];
+      if (apiAuth.isNotEmpty) kvCookies.add('${cookiePre}auth=$apiAuth');
+      if (apiSaltkey.isNotEmpty)
+        kvCookies.add('${cookiePre}saltkey=$apiSaltkey');
+
+      final String current = prefs.getString('saved_cookie_string') ?? '';
+      final String merged = _safeMergeCookies(current, kvCookies);
+      await prefs.setString('saved_cookie_string', merged);
+      debugPrint("💾 [AutoSync] 已从 API Variables 同步 auth/saltkey");
+    }
 
     if (newName.isNotEmpty) {
       if (newName != currentUser.value) {
@@ -550,6 +840,7 @@ class _ForumHomePageState extends State<ForumHomePage> {
     }
 
     print("✅ 解析成功: 获取到 ${tempCats.length} 个分区, ${tempForumMap.length} 个板块");
+    _syncLatestCookie();
 
     if (mounted) {
       _timeoutTimer?.cancel();
@@ -559,31 +850,90 @@ class _ForumHomePageState extends State<ForumHomePage> {
         _forumsMap = tempForumMap;
         _isLoading = false;
       });
+
+      // 【新增】保存主页缓存
+      // 我们只保存关键数据，把 _categories 和 _forumsMap 序列化后保存
+      // 但 _processData 接收的是原始 data，所以我们应该在 _processData 外部保存原始 data
+      // 或者在这里重新构造一下 data 结构
+      // 最简单的办法：在 _fetchDataByDio 和 _parsePageContent 里，成功拿到 jsonStr 后直接保存
     }
+  }
+
+  // 【新增】自动同步 WebView 的 Cookie 到本地
+  Future<void> _syncLatestCookie() async {
+    if (_hiddenController == null) return;
+    try {
+      final String cookies =
+          await _hiddenController!.runJavaScriptReturningResult(
+                'document.cookie',
+              )
+              as String;
+      String rawCookie = cookies;
+      if (rawCookie.startsWith('"') && rawCookie.endsWith('"')) {
+        rawCookie = rawCookie.substring(1, rawCookie.length - 1);
+      }
+
+      if (rawCookie.isNotEmpty &&
+          (rawCookie.contains('auth') || rawCookie.contains('saltkey'))) {
+        final prefs = await SharedPreferences.getInstance();
+        final String current = prefs.getString('saved_cookie_string') ?? '';
+        final List<String> kvCookies = rawCookie
+            .split(';')
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .toList();
+        final String merged = _safeMergeCookies(current, kvCookies);
+        await prefs.setString('saved_cookie_string', merged);
+        debugPrint("💾 [AutoSync] Cookie 已在后台更新，下次启动 Dio 更稳！");
+      }
+    } catch (_) {}
   }
 
   // ==========================================
   // 3. 核心解析逻辑 (修复了重复定义和解析兼容性)
   // ==========================================
-  Future<void> _parsePageContent() async {
-    if (_hiddenController == null) return;
+  Future<void> _parsePageContent({String? inputJson}) async {
     try {
-      final String content =
-          await _hiddenController!.runJavaScriptReturningResult(
-                "document.body.innerText",
-              )
-              as String;
+      String jsonString;
 
-      // 清洗数据
-      String jsonString = content;
-      if (jsonString.startsWith('"') && jsonString.endsWith('"')) {
-        jsonString = jsonString.substring(1, jsonString.length - 1);
-        jsonString = jsonString.replaceAll('\\"', '"').replaceAll('\\\\', '\\');
+      // 1. 如果外部传了 JSON (来自 Dio)，直接用
+      if (inputJson != null) {
+        jsonString = inputJson;
+      } else {
+        // 2. 否则从 WebView 提取
+        if (_hiddenController == null) return;
+        final String content =
+            await _hiddenController!.runJavaScriptReturningResult(
+                  "document.body.innerText",
+                )
+                as String;
+        jsonString = content;
+        // 清洗数据
+        if (jsonString.startsWith('"') && jsonString.endsWith('"')) {
+          jsonString = jsonString.substring(1, jsonString.length - 1);
+          jsonString = jsonString
+              .replaceAll('\\"', '"')
+              .replaceAll('\\\\', '\\');
+        }
       }
 
       print(
         "📄 服务器返回原始内容: ${jsonString.length > 100 ? jsonString.substring(0, 100) + '...' : jsonString}",
       );
+
+      if (!_apiHttpFallbackTried &&
+          jsonString.contains('Webpage not available') &&
+          _hiddenController != null) {
+        _apiHttpFallbackTried = true;
+        final String timestamp = DateTime.now().millisecondsSinceEpoch
+            .toString();
+        await _hiddenController!.loadRequest(
+          Uri.parse(
+            'http://www.giantessnight.com/gnforum2012/api/mobile/index.php?version=4&module=forumindex&t=$timestamp',
+          ),
+        );
+        return;
+      }
 
       var data;
       try {
@@ -597,6 +947,15 @@ class _ForumHomePageState extends State<ForumHomePage> {
           });
         }
         return;
+      }
+
+      // 【新增】验证数据有效性后，保存缓存
+      if (data['Variables'] != null) {
+        final prefs = await SharedPreferences.getInstance();
+        // 保存原始 JSON 字符串，方便下次直接加载
+        // 注意：jsonString 已经是清洗过的
+        await prefs.setString('home_page_cache', jsonString);
+        print("💾 主页数据已缓存");
       }
 
       _processData(data); // Reuse the logic
